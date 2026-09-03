@@ -1,0 +1,27 @@
+{
+  "name": "tgcerber-mcp",
+  "version": "0.1.0",
+  "description": "Local MCP bridge for TG Cerber for Business: decrypts your organization's Telegram archive on your own machine and serves it to Claude over stdio.",
+  "license": "GPL-3.0-only",
+  "repository": { "type": "git", "url": "https://github.com/oqtacore/tgcerber-mcp.git" },
+  "type": "module",
+  "bin": { "tgcerber-mcp": "dist/index.js" },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "npm run build && node test/selftest.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "libsodium-wrappers-sumo": "^0.7.15",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/libsodium-wrappers-sumo": "^0.7.8",
+    "@types/node": "^22.5.0",
+    "typescript": "^5.5.4"
+  }
+}
