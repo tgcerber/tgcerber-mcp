@@ -1,6 +1,6 @@
 {
   "name": "tgcerber-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local MCP bridge for TG Cerber for Business: decrypts your organization's Telegram archive on your own machine and serves it to Claude over stdio — messages, files, voice transcripts, folders and edit history.",
   "license": "GPL-3.0-only",
   "repository": {

@@ -10,9 +10,27 @@ const failure = (error: unknown) => ({
 
 /** Same names, arguments and answers as TG Cerber's cloud mode, so a prompt written against one works against the other. */
 export function createServer(vault: Vault, version: string): McpServer {
-  const server = new McpServer({ name: 'tgcerber-archive', version });
+  const server = new McpServer(
+    { name: 'tgcerber-archive', version },
+    {
+      instructions: [
+        'TG Cerber archive: read-only access to archived Telegram messages and files, decrypted on this machine.',
+        'Two error channels, by MCP convention: a malformed call is a protocol error and nothing ran; an answer about the archive ("no such chat", "several chats match", "no such message") is a tool result with isError=true and a message you can act on.',
+        'Limits differ on purpose: get_chat_messages accepts limit 1–500, search_messages 1–200.',
+        'A photo never has a fileName. media.facts="basic" means the message was archived before file facts were kept, so a missing name, transcript or text says nothing about the file.',
+        'A deleted message is still returned, with deletedAt; an edited one carries edits and editedAt, and get_message_history returns the earlier wordings captured since 2026-09-10.',
+      ].join('\n'),
+    },
+  );
 
-  const account = z.string().min(1).describe('Account id, exact name, or phone number — see list_accounts. No partial matches.');
+  const account = z
+    .string()
+    .min(1)
+    .describe('Account id, exact name, or phone number — see list_accounts. No partial matches. Where optional, omitting it means every account this bridge can read.');
+  const includeDocumentText = z
+    .boolean()
+    .default(false)
+    .describe('Put the full extracted text of each document into media.documentText.text, so a batch of files needs no get_media per file.');
   const chat = z.string().min(1).describe('Chat id (preferred) or title. A title that matches several chats is refused with the candidates listed.');
   const folder = z.string().min(1).describe('Only chats in this Telegram folder of the account (exact folder name, see list_folders).');
   const includeService = z.boolean().default(false).describe('Include service rows (joins, renames, pins). Off by default: they carry no text.');
@@ -65,19 +83,22 @@ export function createServer(vault: Vault, version: string): McpServer {
     'get_chat_messages',
     {
       description:
-        'Messages of one chat in chronological order, newest `limit` by default; page back with `before`. Each message carries its ' +
-        'media facts (file name, MIME type, size, whether the file was saved, a voice transcript), `deletedAt` when Telegram ' +
-        'deleted it (the archive keeps it), and `edits` when earlier versions exist (see get_message_history).',
+        'Messages of one chat in chronological order, newest `limit` (1–500, default 50) by default; page back with `before`. Each ' +
+        'message carries its media facts (file name — never for photos —, MIME type, size, whether the file was saved, a voice ' +
+        'transcript, a document\'s text length), `deletedAt` when Telegram deleted it (the archive keeps it), and `edits` when ' +
+        'earlier versions exist (see get_message_history).',
       inputSchema: {
         account,
         chat,
-        limit: z.number().int().min(1).max(500).default(50),
+        limit: z.number().int().min(1).max(500).default(50).describe('1–500.'),
         before: dateTime.optional().describe('ISO timestamp; only messages before it.'),
         after: dateTime.optional().describe('ISO timestamp; only messages after it.'),
         includeService,
+        includeDocumentText,
       },
     },
-    async ({ account, chat, limit, before, after, includeService }) => guarded(() => vault.getMessages(account, chat, { limit, before, after, includeService })),
+    async ({ account, chat, limit, before, after, includeService, includeDocumentText }) =>
+      guarded(() => vault.getMessages(account, chat, { limit, before, after, includeService, includeDocumentText })),
   );
 
   server.registerTool(
@@ -85,9 +106,10 @@ export function createServer(vault: Vault, version: string): McpServer {
     {
       description:
         'Case-insensitive substring search over message text and captions, sender names, file names, the extracted text of ' +
-        'documents (PDF, Word, Excel, plain text) and voice transcripts; newest first. Each hit says where it matched and ' +
-        'shows a snippet. The result reports how many messages were examined and `partial: true` if the time budget ran out ' +
-        'before all of them were — narrow by account, chat, folder, sender or dates, or repeat the query.',
+        'documents (PDF, Word, Excel, plain text) and voice transcripts; newest first, at most `limit` (1–200, default 30) hits. ' +
+        'Each hit says where it matched (matchedIn) and shows a snippet. The result reports how many messages were examined and ' +
+        '`partial: true` if the time budget ran out before all of them were — narrow by account, chat, folder, sender or dates, ' +
+        'or repeat the query.',
       inputSchema: {
         query: z.string().trim().min(1),
         account: account.optional(),
@@ -97,11 +119,12 @@ export function createServer(vault: Vault, version: string): McpServer {
         before: dateTime.optional(),
         after: dateTime.optional(),
         includeService,
-        limit: z.number().int().min(1).max(200).default(30),
+        includeDocumentText,
+        limit: z.number().int().min(1).max(200).default(30).describe('1–200.'),
       },
     },
-    async ({ query, account, chat, folder, sender, before, after, includeService, limit }) =>
-      guarded(() => vault.search(query, { account, chat, folder, sender, before, after, includeService, limit })),
+    async ({ query, account, chat, folder, sender, before, after, includeService, includeDocumentText, limit }) =>
+      guarded(() => vault.search(query, { account, chat, folder, sender, before, after, includeService, includeDocumentText, limit })),
   );
 
   server.registerTool(
@@ -109,7 +132,8 @@ export function createServer(vault: Vault, version: string): McpServer {
     {
       description:
         'Every archived version of one message, oldest first, with when each was captured — what the text said before it was ' +
-        'edited — plus the current version and its deletion time if Telegram deleted it.',
+        'edited — plus the current version and its deletion time if Telegram deleted it. Versions exist only for edits the ' +
+        'archive witnessed since 2026-09-10; an edited message with none says so in `note`.',
       inputSchema: { account, chat, msgId },
     },
     async ({ account, chat, msgId }) => guarded(() => vault.getMessageHistory(account, chat, msgId)),

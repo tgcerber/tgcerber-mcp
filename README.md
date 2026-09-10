@@ -97,9 +97,9 @@ serving, so messages archived after it started are read as they arrive.
 | `list_accounts` | — | accounts in scope, each with its archive state: messages, media, size, when it last received a message, and — while a sweep is filling it — chats read of total |
 | `list_folders` | `account?` | the owner's Telegram folders and how many archived chats each holds |
 | `list_chats` | `account?`, `folder?` | chats newest first: id, title, type, folders, message / media / deleted / edited counts, oldest archived message, `historyComplete` |
-| `get_chat_messages` | `account`, `chat`, `limit?` (1–500), `before?`, `after?` (ISO), `includeService?` | messages of one chat, chronological, with media facts, `deletedAt`, `edits`, `editedAt` |
-| `search_messages` | `query`, `account?`, `chat?`, `folder?`, `sender?`, `before?`, `after?`, `includeService?`, `limit?` (1–200) | `{ hits, scanned, total, partial }`; each hit says `matchedIn` (text, sender, fileName, document, transcript) with a `snippet` |
-| `get_message_history` | `account`, `chat`, `msgId` | every archived version of one message, oldest first, plus the current one |
+| `get_chat_messages` | `account`, `chat`, `limit?` (1–500), `before?`, `after?` (ISO), `includeService?`, `includeDocumentText?` | messages of one chat, chronological, with media facts (`media.facts` is `basic` for messages archived before 2026-09-10), `deletedAt`, `edits`, `editedAt`; with `includeDocumentText` each document's full text rides in `media.documentText.text` |
+| `search_messages` | `query`, `account?`, `chat?`, `folder?`, `sender?`, `before?`, `after?`, `includeService?`, `includeDocumentText?`, `limit?` (1–200) | `{ hits, scanned, total, partial }`; each hit says `matchedIn` (text, sender, fileName, document, transcript) with a `snippet` |
+| `get_message_history` | `account`, `chat`, `msgId` | every archived version of one message, oldest first, plus the current one; `versionsKeptSince` and a `note` when an edited message has no captured earlier wording |
 | `get_media` | `account`, `chat`, `msgId` | the file's facts, then a photo as an image, a voice message as audio plus transcript, a document as its extracted text (PDF, Word, Excel, plain text) |
 
 `account` is an id, an **exact** name, or a phone number — no partial matches, so a token scoped to some

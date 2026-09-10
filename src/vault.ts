@@ -156,6 +156,9 @@ export interface ChatSummary {
 
 export interface MediaInfo {
   mediaType: string;
+  /** `full` since 2026-09-10; `basic` for a record archived before facts were kept (no name, transcript or text — that says nothing about the file). */
+  facts: 'full' | 'basic';
+  /** Always null for a `photo`. */
   fileName: string | null;
   mimeType: string | null;
   bytes: number | null;
@@ -166,7 +169,7 @@ export interface MediaInfo {
   height?: number;
   isRound?: boolean;
   emoji?: string;
-  documentText?: { kind: string; chars: number; truncated: boolean; pages?: number };
+  documentText?: { kind: string; chars: number; truncated: boolean; pages?: number; text?: string };
   transcript?: string;
   transcriptPartial?: boolean;
   transcriptUnavailable?: string;
@@ -209,6 +212,8 @@ export interface SearchResult {
 export interface MessageHistory {
   current: Message;
   versions: Array<{ text: string; capturedAt: string | null; editDate: string | null; media?: MediaInfo }>;
+  versionsKeptSince: string;
+  note?: string;
 }
 
 export interface MediaContent {
@@ -228,6 +233,7 @@ export class AmbiguousError extends Error {}
 export class NotFoundError extends Error {}
 
 const FETCH_CONCURRENCY = 32;
+export const VERSIONS_KEPT_SINCE = '2026-09-10';
 const SEARCH_BUDGET_MS = 20_000;
 const DEFAULT_REFRESH_MS = 30_000;
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
@@ -248,6 +254,8 @@ interface AccountState {
   account: Account;
   shards: Map<string, ManifestShard>;
   entries: ManifestEntry[] | null;
+  /** The bundle moved; the entries already built keep serving until the rebuild lands. */
+  stale: boolean;
   chats: Record<string, ChatMeta>;
   building: Promise<ManifestEntry[]> | null;
 }
@@ -266,7 +274,7 @@ export class Vault {
     private readonly refetch: (() => Promise<Bundle>) | null,
     private readonly refreshMs: number,
   ) {
-    for (const account of accounts) this.states.set(account.employeeId, { account, shards: new Map(), entries: null, chats: {}, building: null });
+    for (const account of accounts) this.states.set(account.employeeId, { account, shards: new Map(), entries: null, stale: false, chats: {}, building: null });
   }
 
   /**
@@ -366,7 +374,7 @@ export class Vault {
   async getMessages(
     account: string,
     chat: string,
-    opts: { limit: number; before?: string; after?: string; includeService?: boolean },
+    opts: { limit: number; before?: string; after?: string; includeService?: boolean; includeDocumentText?: boolean },
   ): Promise<Message[]> {
     await this.maybeRefresh();
     const acc = this.resolveAccount(account);
@@ -378,12 +386,12 @@ export class Vault {
     if (!Number.isNaN(afterMs)) scoped = scoped.filter(e => (e.date ? Date.parse(e.date) : 0) > afterMs);
     const tail = scoped.sort(byTime).slice(-clamp(opts.limit, 1, 500));
     const records = await mapLimit(tail, e => this.recordFor(acc, e.msgKey));
-    return records.flatMap((r, i) => (r ? [this.toMessage(acc, tail[i]!, r)] : []));
+    return records.flatMap((r, i) => (r ? [this.toMessage(acc, tail[i]!, r, opts.includeDocumentText)] : []));
   }
 
   async search(
     query: string,
-    opts: { account?: string; chat?: string; folder?: string; sender?: string; before?: string; after?: string; includeService?: boolean; limit: number },
+    opts: { account?: string; chat?: string; folder?: string; sender?: string; before?: string; after?: string; includeService?: boolean; includeDocumentText?: boolean; limit: number },
   ): Promise<SearchResult> {
     await this.maybeRefresh();
     const needle = query.trim().toLowerCase();
@@ -421,7 +429,7 @@ export class Vault {
         const where = matchManifest(e, needle);
         if (where) {
           const record = await this.recordFor(acc, e.msgKey);
-          if (record) hits.push({ ...this.toMessage(acc, e, record), matchedIn: where.in, snippet: where.snippet });
+          if (record) hits.push({ ...this.toMessage(acc, e, record, opts.includeDocumentText), matchedIn: where.in, snippet: where.snippet });
           continue;
         }
         if (e.more) needRecord.push(e);
@@ -441,7 +449,7 @@ export class Vault {
           if (!record) continue;
           if (senderNeedle && !(record.sender ?? '').toLowerCase().includes(senderNeedle)) continue;
           const where = matchRecord(record, needle);
-          if (where) hits.push({ ...this.toMessage(acc, e, record), matchedIn: where.in, snippet: where.snippet });
+          if (where) hits.push({ ...this.toMessage(acc, e, record, opts.includeDocumentText), matchedIn: where.in, snippet: where.snippet });
         }
       };
       await Promise.all(Array.from({ length: Math.min(FETCH_CONCURRENCY, needRecord.length) }, worker));
@@ -470,11 +478,17 @@ export class Vault {
     const current = await this.recordFor(acc, entry.msgKey);
     if (!current) throw new NotFoundError(`Message ${msgId} could not be opened.`);
     const olders = await mapLimit(entry.versions ?? [], v => this.recordFor(acc, v.msgKey));
+    const versions = olders.flatMap(r =>
+      r ? [{ text: r.text ?? '', capturedAt: r.capturedAt ?? null, editDate: r.editDate ?? null, ...(r.mediaType ? { media: mediaInfo(r) } : {}) }] : [],
+    );
+    const message = this.toMessage(acc, entry, current);
     return {
-      current: this.toMessage(acc, entry, current),
-      versions: olders.flatMap(r =>
-        r ? [{ text: r.text ?? '', capturedAt: r.capturedAt ?? null, editDate: r.editDate ?? null, ...(r.mediaType ? { media: mediaInfo(r) } : {}) }] : [],
-      ),
+      current: message,
+      versions,
+      versionsKeptSince: VERSIONS_KEPT_SINCE,
+      ...(!versions.length && message.editedAt
+        ? { note: `Telegram says this message was edited, but its earlier wording was not captured: versions are kept only for edits the archive witnessed after ${VERSIONS_KEPT_SINCE}.` }
+        : {}),
     };
   }
 
@@ -574,12 +588,10 @@ export class Vault {
           for (const account of bundle.accounts) {
             const state = this.states.get(account.employeeId);
             if (state) {
-              const moved = state.account.manifests.map(keyOf).join('\n') !== account.manifests.map(keyOf).join('\n');
               state.account = account;
-              if (moved) state.entries = null;
-              else state.entries = null; // the open shard may have grown; entries are rebuilt from cached shards + one fetch
+              state.stale = true; // the open shard may have grown; rebuilt from cached shards plus one fetch
             } else {
-              this.states.set(account.employeeId, { account, shards: new Map(), entries: null, chats: {}, building: null });
+              this.states.set(account.employeeId, { account, shards: new Map(), entries: null, stale: false, chats: {}, building: null });
             }
           }
           for (const id of [...this.states.keys()]) {
@@ -598,7 +610,7 @@ export class Vault {
 
   private async entriesFor(acc: Account): Promise<ManifestEntry[]> {
     const state = this.state(acc);
-    if (state.entries) return state.entries;
+    if (state.entries && !state.stale) return state.entries;
     if (!state.building) {
       state.building = this.buildEntries(state).finally(() => {
         state.building = null;
@@ -643,8 +655,24 @@ export class Vault {
         }
       }
     }
+    await this.learnLegacyIds(acc, all);
     state.entries = foldVersions(all, e => deletedInChat.get(`${e.chatId}:${e.msgId}`) ?? (e.msgId != null ? deletedAnywhere.get(e.msgId) : undefined) ?? null);
+    state.stale = false;
     return state.entries;
+  }
+
+  /** Legacy entries (no `msgId` on the manifest) in a chat the sweep has re-sealed: learn their ids from the records so they fold. */
+  private async learnLegacyIds(acc: Account, all: ManifestEntry[]): Promise<void> {
+    const withIds = new Set<string>();
+    for (const e of all) if (e.msgId != null) withIds.add(chatKey(e));
+    const legacy = all.filter(e => e.msgId == null && e.type !== 'deletion' && withIds.has(chatKey(e)));
+    if (!legacy.length) return;
+    const records = await mapLimit(legacy, e => this.recordFor(acc, e.msgKey));
+    records.forEach((r, i) => {
+      if (!r || typeof r.msgId !== 'number') return;
+      legacy[i]!.msgId = r.msgId;
+      if (r.editDate !== undefined) legacy[i]!.editDate = r.editDate;
+    });
   }
 
   private recordFor(acc: Account, msgKey: string): Promise<MessageRecord | null> {
@@ -667,7 +695,7 @@ export class Vault {
     return JSON.parse(sodium.to_string(opened)) as T;
   }
 
-  private toMessage(acc: Account, e: ManifestEntry, r: MessageRecord): Message {
+  private toMessage(acc: Account, e: ManifestEntry, r: MessageRecord, includeDocumentText = false): Message {
     const key = chatKey(e);
     const meta = this.state(acc).chats[key];
     return {
@@ -683,7 +711,7 @@ export class Vault {
       type: r.type,
       text: r.text ?? '',
       ...(typeof r.replyToId === 'number' ? { replyToId: r.replyToId } : {}),
-      ...(r.mediaType ? { mediaType: r.mediaType, media: mediaInfo(r) } : {}),
+      ...(r.mediaType ? { mediaType: r.mediaType, media: mediaInfo(r, includeDocumentText) } : {}),
       ...(e.deletedAt ? { deletedAt: e.deletedAt } : {}),
       ...(e.versions?.length ? { edits: e.versions.length } : {}),
       ...(r.editDate ? { editedAt: r.editDate } : {}),
@@ -786,10 +814,12 @@ export function foldVersions(all: ManifestEntry[], deletedAt: (e: ManifestEntry)
   return out;
 }
 
-export function mediaInfo(r: MessageRecord): MediaInfo {
+export function mediaInfo(r: MessageRecord, includeDocumentText = false): MediaInfo {
   const saved = r.mediaSaved ?? (Boolean(r.mediaKey) && !r.mediaError);
+  const facts: MediaInfo['facts'] = r.mediaSaved === undefined && r.fileName === undefined ? 'basic' : 'full';
   return {
     mediaType: r.mediaType ?? 'document',
+    facts,
     fileName: r.fileName ?? null,
     mimeType: r.mimeType ?? null,
     bytes: saved ? (r.mediaBytes ?? null) : null,
@@ -800,11 +830,15 @@ export function mediaInfo(r: MessageRecord): MediaInfo {
     ...(r.isRound ? { isRound: true } : {}),
     ...(r.emoji ? { emoji: r.emoji } : {}),
     ...(r.documentText
-      ? { documentText: { kind: r.documentTextKind ?? 'text', chars: r.documentText.length, truncated: Boolean(r.documentTextTruncated), ...(r.documentPages ? { pages: r.documentPages } : {}) } }
+      ? { documentText: { kind: r.documentTextKind ?? 'text', chars: r.documentText.length, truncated: Boolean(r.documentTextTruncated), ...(r.documentPages ? { pages: r.documentPages } : {}), ...(includeDocumentText ? { text: r.documentText } : {}) } }
       : {}),
     ...(r.transcript ? { transcript: r.transcript } : {}),
     ...(r.transcriptPartial ? { transcriptPartial: true } : {}),
-    ...(r.transcriptUnavailable ? { transcriptUnavailable: r.transcriptUnavailable } : {}),
+    ...(r.transcriptUnavailable
+      ? { transcriptUnavailable: r.transcriptUnavailable }
+      : facts === 'basic' && (r.mediaType === 'voice' || r.mediaType === 'audio')
+        ? { transcriptUnavailable: 'archived_before_transcription' }
+        : {}),
   };
 }
 
@@ -812,15 +846,15 @@ type Where = { in: SearchHit['matchedIn']; snippet?: string };
 
 function matchManifest(e: ManifestEntry, needle: string): Where | null {
   if ((e.text ?? '').toLowerCase().includes(needle)) return { in: 'text', snippet: snippet(e.text ?? '', needle) };
-  if ((e.sender ?? '').toLowerCase().includes(needle)) return { in: 'sender' };
-  if ((e.fileName ?? '').toLowerCase().includes(needle)) return { in: 'fileName' };
+  if ((e.sender ?? '').toLowerCase().includes(needle)) return { in: 'sender', snippet: e.sender ?? undefined };
+  if ((e.fileName ?? '').toLowerCase().includes(needle)) return { in: 'fileName', snippet: e.fileName ?? undefined };
   return null;
 }
 
 function matchRecord(r: MessageRecord, needle: string): Where | null {
   if ((r.text ?? '').toLowerCase().includes(needle)) return { in: 'text', snippet: snippet(r.text ?? '', needle) };
-  if ((r.sender ?? '').toLowerCase().includes(needle)) return { in: 'sender' };
-  if ((r.fileName ?? '').toLowerCase().includes(needle)) return { in: 'fileName' };
+  if ((r.sender ?? '').toLowerCase().includes(needle)) return { in: 'sender', snippet: r.sender ?? undefined };
+  if ((r.fileName ?? '').toLowerCase().includes(needle)) return { in: 'fileName', snippet: r.fileName ?? undefined };
   if ((r.documentText ?? '').toLowerCase().includes(needle)) return { in: 'document', snippet: snippet(r.documentText ?? '', needle) };
   if ((r.transcript ?? '').toLowerCase().includes(needle)) return { in: 'transcript', snippet: snippet(r.transcript ?? '', needle) };
   return null;
