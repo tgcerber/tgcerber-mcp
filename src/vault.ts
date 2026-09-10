@@ -227,7 +227,7 @@ export class WrongPasswordError extends Error {
 export class AmbiguousError extends Error {}
 export class NotFoundError extends Error {}
 
-const FETCH_CONCURRENCY = 16;
+const FETCH_CONCURRENCY = 32;
 const SEARCH_BUDGET_MS = 20_000;
 const DEFAULT_REFRESH_MS = 30_000;
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
@@ -451,12 +451,22 @@ export class Vault {
     return { query, hits: hits.slice(0, clamp(opts.limit, 1, 200)), scanned, total, partial, accounts: selected.length };
   }
 
+  /** Manifests written before 2026-09-10 carry no `msgId`; for those the chat's records are opened and compared. */
+  private async entryByMsgId(acc: Account, entries: ManifestEntry[], msgId: number): Promise<ManifestEntry> {
+    const direct = entries.find(e => e.msgId === msgId);
+    if (direct) return direct;
+    const legacy = entries.filter(e => e.msgId == null);
+    const records = await mapLimit(legacy, e => this.recordFor(acc, e.msgKey));
+    const at = records.findIndex(r => r?.msgId === msgId);
+    if (at >= 0) return legacy[at]!;
+    throw new NotFoundError(`No message ${msgId} in that chat of ${acc.name}'s archive.`);
+  }
+
   async getMessageHistory(account: string, chat: string, msgId: number): Promise<MessageHistory> {
     await this.maybeRefresh();
     const acc = this.resolveAccount(account);
     const { entries } = await this.resolveChat(acc, chat);
-    const entry = entries.find(e => e.msgId === msgId);
-    if (!entry) throw new NotFoundError(`No message ${msgId} in that chat of ${acc.name}'s archive.`);
+    const entry = await this.entryByMsgId(acc, entries, msgId);
     const current = await this.recordFor(acc, entry.msgKey);
     if (!current) throw new NotFoundError(`Message ${msgId} could not be opened.`);
     const olders = await mapLimit(entry.versions ?? [], v => this.recordFor(acc, v.msgKey));
@@ -472,8 +482,7 @@ export class Vault {
     await this.maybeRefresh();
     const acc = this.resolveAccount(account);
     const { entries } = await this.resolveChat(acc, chat);
-    const entry = entries.find(e => e.msgId === msgId);
-    if (!entry) throw new NotFoundError(`No message ${msgId} in that chat of ${acc.name}'s archive.`);
+    const entry = await this.entryByMsgId(acc, entries, msgId);
     const record = await this.recordFor(acc, entry.msgKey);
     if (!record) throw new NotFoundError(`Message ${msgId} could not be opened.`);
     const message = this.toMessage(acc, entry, record);
