@@ -85,18 +85,30 @@ claude mcp add tgcerber-archive \
 }
 ```
 
-Restart the client. Verify: the client lists a server named `tgcerber-archive` with four tools.
+Restart the client. Verify: the client lists a server named `tgcerber-archive` with seven tools.
+
+Optional: `TGCERBER_REFRESH_SECONDS` (default 30) is how often the bridge re-fetches the archive list while
+serving, so messages archived after it started are read as they arrive.
 
 ### 5. Tools the client will see
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `list_accounts` | — | accounts in scope, with object counts |
-| `list_chats` | `account?` | chats newest first: id, title, type, message and media counts |
-| `get_chat_messages` | `account`, `chat`, `limit?` (≤500), `before?` (ISO) | most recent messages of one chat, chronological |
-| `search_messages` | `query`, `account?`, `chat?`, `limit?` (≤200) | case-insensitive substring matches, newest first |
+| `list_accounts` | — | accounts in scope, each with its archive state: messages, media, size, when it last received a message, and — while a sweep is filling it — chats read of total |
+| `list_folders` | `account?` | the owner's Telegram folders and how many archived chats each holds |
+| `list_chats` | `account?`, `folder?` | chats newest first: id, title, type, folders, message / media / deleted / edited counts, oldest archived message, `historyComplete` |
+| `get_chat_messages` | `account`, `chat`, `limit?` (1–500), `before?`, `after?` (ISO), `includeService?` | messages of one chat, chronological, with media facts, `deletedAt`, `edits`, `editedAt` |
+| `search_messages` | `query`, `account?`, `chat?`, `folder?`, `sender?`, `before?`, `after?`, `includeService?`, `limit?` (1–200) | `{ hits, scanned, total, partial }`; each hit says `matchedIn` (text, sender, fileName, document, transcript) with a `snippet` |
+| `get_message_history` | `account`, `chat`, `msgId` | every archived version of one message, oldest first, plus the current one |
+| `get_media` | `account`, `chat`, `msgId` | the file's facts, then a photo as an image, a voice message as audio plus transcript, a document as its extracted text (PDF, Word, Excel, plain text) |
 
-`account` accepts an id, an exact name or phone number, or a name substring. `chat` accepts a chat id or a title substring. All results are JSON text.
+`account` is an id, an **exact** name, or a phone number — no partial matches, so a token scoped to some
+of a hundred accounts can never answer for the wrong one. `chat` is a chat id or a title; a title that
+matches several chats is refused with the candidates listed, so pass the id. Service rows (joins,
+renames) are excluded unless `includeService` is set. A message Telegram deleted is still returned,
+marked with `deletedAt`; a message that was edited carries `edits`, and `get_message_history` returns
+what it said before. `historyComplete: false` on a chat means the archive is still filling that chat's
+history back to its first message; `historyFrom` is how far back it currently reaches.
 
 ### 6. Security model, in one paragraph
 
@@ -117,6 +129,8 @@ npm run check   # typecheck
 npm run build   # emit dist/
 ```
 
-Source layout: `src/vault.ts` (fetch, unwrap, open, query), `src/server.ts` (MCP tools), `src/index.ts` (CLI and stdio transport). No network access besides the archive endpoint and the presigned object URLs it returns.
+Source layout: `src/vault.ts` (fetch, unwrap, open, query), `src/server.ts` (MCP tools), `src/index.ts` (CLI and stdio transport). No network access besides the archive endpoint and the presigned object URLs it returns. `npm test` builds and runs `test/selftest.mjs`: a throwaway archive sealed with real libsodium in the server's wire format, served locally, read through every tool over stdio.
+
+Document text is extracted with `pdf-parse`, `mammoth` and `xlsx` when a document's record does not already carry it (the server extracts at archive time since 2026-09-10).
 
 License: GPL-3.0-only.
