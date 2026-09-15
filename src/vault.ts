@@ -78,8 +78,90 @@ export interface ManifestEntry {
   editDate?: string | null;
   /** The record holds more searchable text: a transcript or a document's contents. */
   more?: boolean;
+  /** On a `type: 'members'` entry: how many members the snapshot holds. The object is a `MembersSnapshot`. */
+  members?: number;
   deletedAt?: string | null;
   versions?: ManifestEntry[];
+}
+
+export interface NamedUser {
+  id: number;
+  name: string | null;
+  username: string | null;
+}
+
+/** What a service row says happened (records sealed since 2026-09-15). */
+export interface ServiceEvent {
+  kind: string;
+  action: string;
+  by: string | null;
+  byId: number | null;
+  members?: NamedUser[];
+  title?: string;
+  pinnedMsgId?: number;
+  inviter?: NamedUser;
+  [extra: string]: unknown;
+}
+
+export type MemberRole = 'owner' | 'admin' | 'member' | 'restricted';
+
+export interface MemberRecord extends NamedUser {
+  role: MemberRole;
+  title?: string;
+  joinedAt: string | null;
+  invitedBy?: NamedUser;
+  promotedBy?: NamedUser;
+  bot?: true;
+  deleted?: true;
+  premium?: true;
+  phone?: string;
+}
+
+/** A group's member list as the sweep sealed it. */
+export interface MembersSnapshot {
+  type: 'members';
+  chatId?: string | number | null;
+  chatTitle: string;
+  chatType?: string | null;
+  capturedAt: string;
+  total: number | null;
+  truncated: boolean;
+  unavailable?: string;
+  members: MemberRecord[];
+}
+
+export interface MemberView extends MemberRecord {
+  status: 'current' | 'left';
+  source: 'snapshot' | 'event';
+  leftAt?: string;
+  how?: 'left' | 'removed';
+  removedBy?: string | null;
+}
+
+export interface MembershipChange {
+  date: string | null;
+  msgId: number | null;
+  kind: string;
+  by: string | null;
+  byId: number | null;
+  members: NamedUser[];
+  text: string;
+}
+
+export interface ChatMembers {
+  account: string;
+  accountName: string;
+  chat: string;
+  title: string;
+  type: string | null;
+  capturedAt: string | null;
+  total: number | null;
+  truncated: boolean;
+  unavailable?: string;
+  members: MemberView[];
+  former: MemberView[];
+  changesSince: MembershipChange[];
+  note?: string;
 }
 
 export interface ChatMeta {
@@ -135,6 +217,7 @@ export interface MessageRecord {
   transcript?: string;
   transcriptPartial?: boolean;
   transcriptUnavailable?: string;
+  event?: ServiceEvent;
 }
 
 export interface ChatSummary {
@@ -152,6 +235,8 @@ export interface ChatSummary {
   historyFrom: string | null;
   lastAt: string | null;
   historyComplete: boolean | null;
+  /** Members in the last recorded member list of a group; null when none is recorded. */
+  members: number | null;
 }
 
 export interface MediaInfo {
@@ -190,6 +275,8 @@ export interface Message {
   replyToId?: number | null;
   media?: MediaInfo;
   mediaType?: string;
+  /** On a service row: what happened, structured; `text` is the sentence. */
+  event?: ServiceEvent;
   deletedAt?: string;
   edits?: number;
   editedAt?: string;
@@ -323,7 +410,7 @@ export class Vault {
     const out: ChatSummary[] = [];
     for (const acc of selected) {
       const entries = await this.entriesFor(acc);
-      const chats = new Map<string, ChatSummary & { lastMs: number; firstMs: number }>();
+      const chats = new Map<string, ChatSummary & { lastMs: number; firstMs: number; membersMs: number }>();
       for (const e of entries) {
         const key = chatKey(e);
         let chat = chats.get(key);
@@ -344,10 +431,20 @@ export class Vault {
             historyFrom: null,
             lastAt: null,
             historyComplete: acc.coverage ? (acc.coverage[key]?.complete ?? false) : null,
+            members: null,
             lastMs: 0,
             firstMs: Number.MAX_SAFE_INTEGER,
+            membersMs: -1,
           };
           chats.set(key, chat);
+        }
+        if (e.type === 'members') {
+          const ms = e.date ? Date.parse(e.date) || 0 : 0;
+          if (ms >= chat.membersMs) {
+            chat.membersMs = ms;
+            chat.members = typeof e.members === 'number' ? e.members : chat.members;
+          }
+          continue;
         }
         if (e.type !== 'service') chat.messages += 1;
         if (e.mediaKey) chat.media += 1;
@@ -363,7 +460,7 @@ export class Vault {
           chat.historyFrom = e.date ?? null;
         }
       }
-      for (const { lastMs: _l, firstMs: _f, ...chat } of chats.values()) {
+      for (const { lastMs: _l, firstMs: _f, membersMs: _m, ...chat } of chats.values()) {
         if (folder && !chat.folders.some(f => f.toLowerCase() === folder.trim().toLowerCase())) continue;
         out.push(chat);
       }
@@ -381,7 +478,7 @@ export class Vault {
     const { entries } = await this.resolveChat(acc, chat);
     const beforeMs = opts.before ? Date.parse(opts.before) : Number.NaN;
     const afterMs = opts.after ? Date.parse(opts.after) : Number.NaN;
-    let scoped = opts.includeService ? entries : entries.filter(e => e.type !== 'service');
+    let scoped = entries.filter(e => isMessage(e) || (opts.includeService && e.type === 'service'));
     if (!Number.isNaN(beforeMs)) scoped = scoped.filter(e => (e.date ? Date.parse(e.date) : 0) < beforeMs);
     if (!Number.isNaN(afterMs)) scoped = scoped.filter(e => (e.date ? Date.parse(e.date) : 0) > afterMs);
     const tail = scoped.sort(byTime).slice(-clamp(opts.limit, 1, 500));
@@ -409,7 +506,7 @@ export class Vault {
 
     for (const acc of selected) {
       let entries = opts.chat ? (await this.resolveChat(acc, opts.chat)).entries : await this.entriesFor(acc);
-      if (!opts.includeService) entries = entries.filter(e => e.type !== 'service');
+      entries = entries.filter(e => isMessage(e) || (opts.includeService && e.type === 'service'));
       if (folderNeedle) {
         const chats = this.state(acc).chats;
         entries = entries.filter(e => chats[chatKey(e)]?.folders.some(f => f.toLowerCase() === folderNeedle));
@@ -463,7 +560,7 @@ export class Vault {
   private async entryByMsgId(acc: Account, entries: ManifestEntry[], msgId: number): Promise<ManifestEntry> {
     const direct = entries.find(e => e.msgId === msgId);
     if (direct) return direct;
-    const legacy = entries.filter(e => e.msgId == null);
+    const legacy = entries.filter(e => e.msgId == null && e.type !== 'members');
     const records = await mapLimit(legacy, e => this.recordFor(acc, e.msgKey));
     const at = records.findIndex(r => r?.msgId === msgId);
     if (at >= 0) return legacy[at]!;
@@ -490,6 +587,98 @@ export class Vault {
         ? { note: `Telegram says this message was edited, but its earlier wording was not captured: versions are kept only for edits the archive witnessed after ${VERSIONS_KEPT_SINCE}.` }
         : {}),
     };
+  }
+
+  /**
+   * Who is in a group — silent members included — and who used to be. Same rules as the server's
+   * cloud reader: the newest `members` snapshot is the list, the service rows after it are applied
+   * to it, earlier snapshots and leave/removal rows give `former`.
+   */
+  async listChatMembers(account: string, chat: string): Promise<ChatMembers> {
+    await this.maybeRefresh();
+    const acc = this.resolveAccount(account);
+    const { key, entries } = await this.resolveChat(acc, chat);
+    const meta = this.state(acc).chats[key];
+    const type = meta?.type ?? entries.find(e => e.chatType)?.chatType ?? null;
+    const title = meta?.title || entries[entries.length - 1]?.chatTitle || key;
+    if (type === 'user' || type === 'bot') throw new NotFoundError(`"${title}" is a private chat; list_chat_members is for groups and supergroups.`);
+    if (type === 'channel') throw new NotFoundError(`"${title}" is a broadcast channel; subscriber lists are not archived (Telegram shows them to admins only).`);
+
+    const snapshotEntries = entries.filter(e => e.type === 'members').sort(byTime);
+    const snapshots = (await mapLimit(snapshotEntries.slice(-30), e => this.recordFor(acc, e.msgKey) as Promise<MembersSnapshot | null>)).filter(
+      (s): s is MembersSnapshot => Boolean(s && Array.isArray(s.members)),
+    );
+    const latest = snapshots[snapshots.length - 1] ?? null;
+    const capturedAt = latest?.capturedAt ?? null;
+    const capturedMs = capturedAt ? Date.parse(capturedAt) : Number.NEGATIVE_INFINITY;
+
+    const serviceEntries = entries.filter(e => e.type === 'service').sort(byTime);
+    const serviceRecords = await mapLimit(serviceEntries, e => this.recordFor(acc, e.msgKey));
+    const events: Array<{ record: MessageRecord; event: ServiceEvent; ms: number }> = [];
+    serviceRecords.forEach((r, i) => {
+      if (!r?.event || !MEMBERSHIP_KINDS.has(r.event.kind)) return;
+      const date = r.date ?? serviceEntries[i]!.date ?? null;
+      events.push({ record: r, event: r.event, ms: date ? Date.parse(date) || 0 : 0 });
+    });
+
+    const current = new Map<number, MemberView>();
+    const former = new Map<number, MemberView>();
+    for (const m of latest?.members ?? []) current.set(m.id, { ...m, status: 'current', source: 'snapshot' });
+    for (const s of snapshots.slice(0, -1)) {
+      for (const m of s.members) if (!current.has(m.id) && !former.has(m.id)) former.set(m.id, { ...m, status: 'left', source: 'snapshot' });
+    }
+    const changesSince: MembershipChange[] = [];
+    for (const { record, event, ms } of events) {
+      const people = event.members ?? [];
+      const after = ms > capturedMs;
+      if (after) changesSince.push({ date: record.date ?? null, msgId: record.msgId, kind: event.kind, by: event.by, byId: event.byId, members: people, text: record.text ?? '' });
+      for (const p of people) {
+        if (event.kind === 'member_added' || event.kind === 'member_joined' || event.kind === 'chat_created') {
+          if (!after) continue;
+          former.delete(p.id);
+          if (!current.has(p.id)) {
+            current.set(p.id, { ...p, role: 'member', joinedAt: record.date ?? null, status: 'current', source: 'event', ...(event.kind === 'member_added' && event.by ? { invitedBy: { id: event.byId ?? 0, name: event.by, username: null } } : {}) });
+          }
+        } else if (event.kind === 'member_left' || event.kind === 'member_removed') {
+          const how = event.kind === 'member_left' ? 'left' : 'removed';
+          const known = current.get(p.id);
+          if (after && known) {
+            current.delete(p.id);
+            former.set(p.id, { ...known, status: 'left', leftAt: record.date ?? undefined, how, ...(how === 'removed' ? { removedBy: event.by } : {}) });
+          } else if (!current.has(p.id)) {
+            const prior = former.get(p.id);
+            former.set(p.id, {
+              ...(prior ?? { ...p, role: 'member' as const, joinedAt: null, source: 'event' as const }),
+              status: 'left',
+              ...(prior?.leftAt && Date.parse(prior.leftAt) > ms ? {} : { leftAt: record.date ?? undefined, how, ...(how === 'removed' ? { removedBy: event.by } : {}) }),
+            });
+          }
+        }
+      }
+    }
+    const byRole = (a: MemberView, b: MemberView): number => ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || (a.name ?? '').localeCompare(b.name ?? '');
+    const out: ChatMembers = {
+      account: acc.employeeId,
+      accountName: acc.name,
+      chat: key,
+      title,
+      type,
+      capturedAt,
+      total: latest?.total ?? null,
+      truncated: latest?.truncated ?? false,
+      ...(latest?.unavailable ? { unavailable: latest.unavailable } : {}),
+      members: [...current.values()].sort(byRole),
+      former: [...former.values()].sort((a, b) => leftMs(b) - leftMs(a) || (a.name ?? '').localeCompare(b.name ?? '')),
+      changesSince,
+    };
+    if (!latest) {
+      out.note =
+        "No member list has been recorded for this chat yet: lists are captured by the account's full check (every 24 h, since 2026-09-15). " +
+        'What is shown comes from the joins and leaves the archive witnessed and is not the whole membership.';
+    } else if (latest.unavailable) {
+      out.note = `Telegram refused the member list at the last check (${latest.unavailable}): the group hides its members from non-admins, or the account is no longer in it. Only changes seen in service messages are listed.`;
+    }
+    return out;
   }
 
   async getMedia(account: string, chat: string, msgId: number): Promise<MediaContent> {
@@ -665,7 +854,7 @@ export class Vault {
   private async learnLegacyIds(acc: Account, all: ManifestEntry[]): Promise<void> {
     const withIds = new Set<string>();
     for (const e of all) if (e.msgId != null) withIds.add(chatKey(e));
-    const legacy = all.filter(e => e.msgId == null && e.type !== 'deletion' && withIds.has(chatKey(e)));
+    const legacy = all.filter(e => e.msgId == null && e.type !== 'deletion' && e.type !== 'members' && withIds.has(chatKey(e)));
     if (!legacy.length) return;
     const records = await mapLimit(legacy, e => this.recordFor(acc, e.msgKey));
     records.forEach((r, i) => {
@@ -712,6 +901,7 @@ export class Vault {
       text: r.text ?? '',
       ...(typeof r.replyToId === 'number' ? { replyToId: r.replyToId } : {}),
       ...(r.mediaType ? { mediaType: r.mediaType, media: mediaInfo(r, includeDocumentText) } : {}),
+      ...(r.event ? { event: r.event } : {}),
       ...(e.deletedAt ? { deletedAt: e.deletedAt } : {}),
       ...(e.versions?.length ? { edits: e.versions.length } : {}),
       ...(r.editDate ? { editedAt: r.editDate } : {}),
@@ -760,6 +950,15 @@ export function openMedia(envelope: MediaEnvelope, pub: Uint8Array, priv: Uint8A
 }
 
 // ---- helpers ----
+
+const MEMBERSHIP_KINDS = new Set(['member_added', 'member_joined', 'member_left', 'member_removed', 'chat_created']);
+const ROLE_ORDER: Record<MemberRole, number> = { owner: 0, admin: 1, member: 2, restricted: 3 };
+const leftMs = (m: { leftAt?: string }): number => (m.leftAt ? Date.parse(m.leftAt) || 0 : 0);
+
+/** A conversation row: not a service line, not a member-list snapshot. */
+export function isMessage(e: { type: string }): boolean {
+  return e.type !== 'service' && e.type !== 'members' && e.type !== 'deletion';
+}
 
 export function chatKey(e: { chatId?: string | number | null; chatTitle: string }): string {
   return e.chatId != null && e.chatId !== '' ? String(e.chatId) : `title:${e.chatTitle}`;

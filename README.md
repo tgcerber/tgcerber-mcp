@@ -85,7 +85,7 @@ claude mcp add tgcerber-archive \
 }
 ```
 
-Restart the client. Verify: the client lists a server named `tgcerber-archive` with seven tools.
+Restart the client. Verify: the client lists a server named `tgcerber-archive` with eight tools.
 
 Optional: `TGCERBER_REFRESH_SECONDS` (default 30) is how often the bridge re-fetches the archive list while
 serving, so messages archived after it started are read as they arrive.
@@ -96,16 +96,19 @@ serving, so messages archived after it started are read as they arrive.
 |---|---|---|
 | `list_accounts` | — | accounts in scope, each with its archive state: messages, media, size, when it last received a message, and — while a sweep is filling it — chats read of total |
 | `list_folders` | `account?` | the owner's Telegram folders and how many archived chats each holds |
-| `list_chats` | `account?`, `folder?` | chats newest first: id, title, type, folders, message / media / deleted / edited counts, oldest archived message, `historyComplete` |
-| `get_chat_messages` | `account`, `chat`, `limit?` (1–500), `before?`, `after?` (ISO), `includeService?`, `includeDocumentText?` | messages of one chat, chronological, with media facts (`media.facts` is `basic` for messages archived before 2026-09-10), `deletedAt`, `edits`, `editedAt`; with `includeDocumentText` each document's full text rides in `media.documentText.text` |
+| `list_chats` | `account?`, `folder?` | chats newest first: id, title, type, folders, message / media / deleted / edited counts, oldest archived message, `historyComplete`, and for groups `members` (the count in the last recorded member list) |
+| `list_chat_members` | `account`, `chat` | everyone in a group — silent members included — with name, username, id, role (owner / admin / member / restricted), join date and inviter, as of the last full check (`capturedAt`); `former` lists people who left or were removed (when and how, from earlier lists and service rows); `changesSince` the joins and leaves seen after the snapshot; `note` when the answer is partial |
+| `get_chat_messages` | `account`, `chat`, `limit?` (1–500), `before?`, `after?` (ISO), `includeService?`, `includeDocumentText?` | messages of one chat, chronological, with media facts (`media.facts` is `basic` for messages archived before 2026-09-10), `deletedAt`, `edits`, `editedAt`; with `includeDocumentText` each document's full text rides in `media.documentText.text`; with `includeService` the service rows too, each with a readable `text` ("Fazil added Fedor") and a structured `event` |
 | `search_messages` | `query`, `account?`, `chat?`, `folder?`, `sender?`, `before?`, `after?`, `includeService?`, `includeDocumentText?`, `limit?` (1–200) | `{ hits, scanned, total, partial }`; each hit says `matchedIn` (text, sender, fileName, document, transcript) with a `snippet` |
 | `get_message_history` | `account`, `chat`, `msgId` | every archived version of one message, oldest first, plus the current one; `versionsKeptSince` and a `note` when an edited message has no captured earlier wording |
 | `get_media` | `account`, `chat`, `msgId` | the file's facts, then a photo as an image, a voice message as audio plus transcript, a document as its extracted text (PDF, Word, Excel, plain text) |
 
 `account` is an id, an **exact** name, or a phone number — no partial matches, so a token scoped to some
 of a hundred accounts can never answer for the wrong one. `chat` is a chat id or a title; a title that
-matches several chats is refused with the candidates listed, so pass the id. Service rows (joins,
-renames) are excluded unless `includeService` is set. A message Telegram deleted is still returned,
+matches several chats is refused with the candidates listed, so pass the id. Service rows (members
+added, left or removed, renames, pins) are excluded unless `includeService` is set; since 2026-09-15
+each says what happened, in `text` and in `event` (`kind`, `by`, `members` with names), and
+`list_chat_members` gives a group's whole member list. A message Telegram deleted is still returned,
 marked with `deletedAt`; a message that was edited carries `edits`, and `get_message_history` returns
 what it said before. `historyComplete: false` on a chat means the archive is still filling that chat's
 history back to its first message; `historyFrom` is how far back it currently reaches.

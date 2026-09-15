@@ -63,6 +63,31 @@ const entries = messages.map((m, i) => {
   if (!legacy) Object.assign(entry, { text: m.text, sender: m.sender, mediaType: media?.mediaType ?? null, fileName: media?.fileName ?? null, editDate: m.editDate ?? null, more: Boolean(m.documentText) });
   return entry;
 });
+// A group's member list as the sweep seals it (2026-09-15), and a readable service row after it.
+const membersKey = 'org/o/emp/e/members/1.json';
+objects[membersKey] = seal({
+  type: 'members',
+  chatId: 99,
+  chatTitle: 'Partners chat',
+  chatType: 'group',
+  capturedAt: '2026-09-02T10:00:00Z',
+  total: 3,
+  truncated: false,
+  members: [
+    { id: 9, name: 'Nina', username: 'nina', role: 'owner', joinedAt: null },
+    { id: 1, name: 'Alex Kade', username: null, role: 'member', joinedAt: '2026-09-01T09:00:00Z', invitedBy: { id: 9, name: 'Nina', username: 'nina' } },
+    { id: 12, name: 'Quiet Quentin', username: null, role: 'member', joinedAt: '2026-09-01T09:00:00Z' },
+  ],
+});
+entries.push({ msgKey: membersKey, mediaKey: null, type: 'members', chatTitle: 'Partners chat', chatId: 99, chatType: 'group', date: '2026-09-02T10:00:00Z', msgId: null, members: 3 });
+const leftKey = 'org/o/emp/e/msg/left.json';
+objects[leftKey] = seal({
+  chatId: 99, chatTitle: 'Partners chat', chatType: 'group', msgId: 6, date: '2026-09-02T11:00:00Z', type: 'service',
+  text: 'Quiet Quentin left the group', sender: 'Quiet Quentin', senderId: 12,
+  event: { kind: 'member_left', action: 'user_left', by: 'Quiet Quentin', byId: 12, members: [{ id: 12, name: 'Quiet Quentin', username: null }] },
+});
+entries.push({ msgKey: leftKey, mediaKey: null, type: 'service', chatTitle: 'Partners chat', chatId: 99, chatType: 'group', date: '2026-09-02T11:00:00Z', msgId: 6, text: 'Quiet Quentin left the group', sender: 'Quiet Quentin' });
+
 const manifestKey = 'org/o/emp/e/manifests/0.json';
 objects[manifestKey] = seal({
   v: 1,
@@ -171,6 +196,9 @@ const session = await run([], {}, [
   { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'list_folders', arguments: {} } },
   { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'get_chat_messages', arguments: { account: 'e', chat: 'david', limit: 0 } } },
   { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'list_accounts', arguments: {} } },
+  { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'list_chat_members', arguments: { account: 'e', chat: '99' } } },
+  { jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: 'get_chat_messages', arguments: { account: 'e', chat: '99', limit: 10, includeService: true } } },
+  { jsonrpc: '2.0', id: 15, method: 'tools/call', params: { name: 'list_chat_members', arguments: { account: 'e', chat: '42' } } },
 ]);
 const replies = Object.fromEntries(
   session.out
@@ -189,11 +217,11 @@ const replies = Object.fromEntries(
 const payload = id => JSON.parse(replies[id]?.result?.content?.[0]?.text ?? 'null');
 
 check('initialize is answered', Boolean(replies[1]?.result?.serverInfo), JSON.stringify(replies[1]));
-check('seven tools are listed', replies[2]?.result?.tools?.length === 7, JSON.stringify(replies[2]?.result?.tools?.map(t => t.name)));
+check('eight tools are listed', replies[2]?.result?.tools?.length === 8 && replies[2].result.tools.some(t => t.name === 'list_chat_members'), JSON.stringify(replies[2]?.result?.tools?.map(t => t.name)));
 const search = payload(3);
 check('search finds the contract message and says what it scanned', search?.hits?.length === 1 && /contract/.test(search.hits[0].text) && search.hits[0].matchedIn === 'text' && search.scanned === 5 && search.partial === false, JSON.stringify(search));
 const chats = payload(4);
-check('chats are listed newest first, with folders and completeness', Array.isArray(chats) && chats.length === 2 && chats[0].title === 'Partners chat' && chats[0].folders[0] === 'Partners' && chats[0].historyComplete === false && chats[1].historyComplete === true, JSON.stringify(chats));
+check('chats are listed newest first, with folders, completeness and member counts', Array.isArray(chats) && chats.length === 2 && chats[0].title === 'Partners chat' && chats[0].folders[0] === 'Partners' && chats[0].historyComplete === false && chats[1].historyComplete === true && chats[0].members === 3 && chats[0].messages === 3 && chats[1].members === null, JSON.stringify(chats));
 const thread = payload(5);
 check('a chat is read in order, with edits folded', Array.isArray(thread) && thread.length === 2 && thread[0].msgId === 1 && thread[1].msgId === 2 && thread[1].edits === 1 && /tomorrow/.test(thread[1].text), JSON.stringify(thread));
 check('an account fragment is refused', replies[6]?.result?.isError === true && /No account matching "alex"/.test(replies[6]?.result?.content?.[0]?.text ?? ''), JSON.stringify(replies[6]?.result));
@@ -208,6 +236,27 @@ check('folders are listed', Array.isArray(folders) && folders.length === 1 && fo
 check('limit 0 is refused by the schema', replies[11]?.error?.code === -32602 || replies[11]?.result?.isError === true, JSON.stringify(replies[11]));
 const accounts = payload(12);
 check('accounts carry the archive state', accounts?.[0]?.archive?.messages === 5 && accounts[0].archive.liveArchive === true, JSON.stringify(accounts));
+const members = payload(13);
+check(
+  'a group lists its members, the silent one included, and applies the leave seen after the snapshot',
+  members?.capturedAt === '2026-09-02T10:00:00Z' &&
+    members.members.map(m => `${m.name}:${m.role}`).join(',') === 'Nina:owner,Alex Kade:member' &&
+    members.members[1].invitedBy?.name === 'Nina' &&
+    members.former.length === 1 &&
+    members.former[0].name === 'Quiet Quentin' &&
+    members.former[0].how === 'left' &&
+    members.former[0].leftAt === '2026-09-02T11:00:00Z' &&
+    members.changesSince.length === 1 &&
+    members.note === undefined,
+  JSON.stringify(members),
+);
+const withService = payload(14);
+check(
+  'service rows carry the sentence and the event, and the snapshot is not a message',
+  Array.isArray(withService) && withService.length === 4 && withService[3].type === 'service' && withService[3].text === 'Quiet Quentin left the group' && withService[3].event?.kind === 'member_left',
+  JSON.stringify(withService?.map(m => [m.msgId, m.type, m.text])),
+);
+check('a private chat has no member list', replies[15]?.result?.isError === true && /private chat/.test(replies[15]?.result?.content?.[0]?.text ?? ''), JSON.stringify(replies[15]?.result));
 
 server.close();
 process.exit(failures ? 1 : 0);

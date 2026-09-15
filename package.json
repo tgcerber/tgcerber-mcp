@@ -1,11 +1,11 @@
 {
   "name": "tgcerber-mcp",
-  "version": "0.3.0",
-  "description": "Local MCP bridge for TG Cerber for Business: decrypts your organization's Telegram archive on your own machine and serves it to Claude over stdio — messages, files, voice transcripts, folders and edit history.",
+  "version": "0.4.0",
+  "description": "Local MCP bridge for TG Cerber for Business: decrypts your organization's Telegram archive on your own machine and serves it to Claude over stdio — messages, files, voice transcripts, folders, edit history and group member lists.",
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "https://github.com/oqtacore/tgcerber-mcp.git"
+    "url": "https://github.com/tgcerber/tgcerber-mcp.git"
   },
   "type": "module",
   "bin": {

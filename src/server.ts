@@ -19,6 +19,7 @@ export function createServer(vault: Vault, version: string): McpServer {
         'Limits differ on purpose: get_chat_messages accepts limit 1–500, search_messages 1–200.',
         'A photo never has a fileName. media.facts="basic" means the message was archived before file facts were kept, so a missing name, transcript or text says nothing about the file.',
         'A deleted message is still returned, with deletedAt; an edited one carries edits and editedAt, and get_message_history returns the earlier wordings captured since 2026-09-10.',
+        'Group membership: list_chat_members returns everyone in a group (silent members included) with role, join date and inviter as of the last full check (capturedAt), plus former members and the joins/leaves seen since. Service rows (includeService=true) say what happened in `text` and structured in `event` (kind member_added / member_left / member_removed / chat_renamed / photo_changed / message_pinned / …); rows archived before 2026-09-15 have an empty text.',
       ].join('\n'),
     },
   );
@@ -33,7 +34,12 @@ export function createServer(vault: Vault, version: string): McpServer {
     .describe('Put the full extracted text of each document into media.documentText.text, so a batch of files needs no get_media per file.');
   const chat = z.string().min(1).describe('Chat id (preferred) or title. A title that matches several chats is refused with the candidates listed.');
   const folder = z.string().min(1).describe('Only chats in this Telegram folder of the account (exact folder name, see list_folders).');
-  const includeService = z.boolean().default(false).describe('Include service rows (joins, renames, pins). Off by default: they carry no text.');
+  const includeService = z
+    .boolean()
+    .default(false)
+    .describe(
+      'Include service rows: members added, joined, left or removed, renames, photo changes, pins, calls. Each carries a readable `text` ("Fazil Suleymanov added Fedor Erashev") and a structured `event` {kind, by, byId, members[{id,name,username}], title, pinnedMsgId}. Off by default.',
+    );
   const msgId = z.number().int().min(1).describe('The Telegram message id.');
   const dateTime = z.string().datetime({ offset: true });
 
@@ -72,11 +78,27 @@ export function createServer(vault: Vault, version: string): McpServer {
     {
       description:
         'Chats in the archive, newest first, with their Telegram folders, message/media/deleted/edited counts, the oldest ' +
-        'archived message and whether the history is complete back to the first message (historyComplete=false means the ' +
-        'archive is still being filled for that chat). Optionally limited to one account or one folder.',
+        'archived message, whether the history is complete back to the first message (historyComplete=false means the ' +
+        'archive is still being filled for that chat) and, for groups, the member count of the last recorded member list ' +
+        '(`members`, null when none is recorded yet). Optionally limited to one account or one folder.',
       inputSchema: { account: account.optional(), folder: folder.optional() },
     },
     async ({ account, folder }) => guarded(() => vault.listChats(account, folder)),
+  );
+
+  server.registerTool(
+    'list_chat_members',
+    {
+      description:
+        'Who is in a group chat — every member, the silent ones included — with name, username, id, role (owner / admin / ' +
+        "member / restricted), when they joined and who invited them, as Telegram listed them at the account's last full " +
+        'check (`capturedAt`; a check runs every 24 h). Also `former`: people who were in an earlier list or whose leaving / ' +
+        'removal the archive saw (with when and how), and `changesSince`: the joins and leaves witnessed after the snapshot, ' +
+        'already applied to `members`. Groups and supergroups only; a private chat or a broadcast channel → tool result with ' +
+        'isError. `note` explains a partial answer (no list recorded yet, or Telegram hides the members).',
+      inputSchema: { account, chat },
+    },
+    async ({ account, chat }) => guarded(() => vault.listChatMembers(account, chat)),
   );
 
   server.registerTool(
