@@ -632,12 +632,15 @@ export class Vault {
       const people = event.members ?? [];
       const after = ms > capturedMs;
       if (after) changesSince.push({ date: record.date ?? null, msgId: record.msgId, kind: event.kind, by: event.by, byId: event.byId, members: people, text: record.text ?? '' });
+      if (event.kind === 'chat_created' && after && event.byId !== null && !current.has(event.byId)) {
+        current.set(event.byId, { id: event.byId, name: event.by, username: null, role: 'owner', joinedAt: record.date ?? null, status: 'current', source: 'event' });
+      }
       for (const p of people) {
         if (event.kind === 'member_added' || event.kind === 'member_joined' || event.kind === 'chat_created') {
           if (!after) continue;
           former.delete(p.id);
           if (!current.has(p.id)) {
-            current.set(p.id, { ...p, role: 'member', joinedAt: record.date ?? null, status: 'current', source: 'event', ...(event.kind === 'member_added' && event.by ? { invitedBy: { id: event.byId ?? 0, name: event.by, username: null } } : {}) });
+            current.set(p.id, { ...p, role: 'member', joinedAt: record.date ?? null, status: 'current', source: 'event', ...((event.kind === 'member_added' || event.kind === 'chat_created') && event.by ? { invitedBy: { id: event.byId ?? 0, name: event.by, username: null } } : {}) });
           }
         } else if (event.kind === 'member_left' || event.kind === 'member_removed') {
           const how = event.kind === 'member_left' ? 'left' : 'removed';
