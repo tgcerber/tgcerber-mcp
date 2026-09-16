@@ -94,11 +94,11 @@ serving, so messages archived after it started are read as they arrive.
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `list_accounts` | — | accounts in scope, each with its archive state: messages, media, size, when it last received a message, and — while a sweep is filling it — chats read of total |
+| `list_accounts` | — | accounts in scope, each with its archive state: messages, media, size, when it last received a message, and — while a sweep is filling it — chats read of total. `archive.messages` and `archive.media` are the same counts `list_chats` reports; `archive.sealedObjects` is the raw object count in the vault, larger because it counts every version of an edited message, member snapshots and service rows |
 | `list_folders` | `account?` | the owner's Telegram folders and how many archived chats each holds |
-| `list_chats` | `account?`, `folder?` | chats newest first: id, title, type, folders, message / media / deleted / edited counts, oldest archived message, `historyComplete`, and for groups `members` (the count in the last recorded member list) |
+| `list_chats` | `account?`, `folder?`, `unreadOnly?` | chats newest first: id, title, type, folders, message / media / deleted / edited counts, oldest archived message, `historyComplete`, for groups `members` (the count in the last recorded member list), `autoDelete` (Telegram's disappearing-message timer: `{enabled, seconds, seenAt}`, `{enabled:false}` when off, `null` when the archive has never looked), `unread` (`{count, mentions, lastReadMsgId, lastReadAt, seenAt}`) and `mediaPolicy` |
 | `list_chat_members` | `account`, `chat` | everyone in a group — silent members included — with name, username, id, role (owner / admin / member / restricted), join date and inviter, as of the last full check (`capturedAt`); `former` lists people who left or were removed (when and how, from earlier lists and service rows); `changesSince` the joins and leaves seen after the snapshot; `note` when the answer is partial |
-| `get_chat_messages` | `account`, `chat`, `limit?` (1–500), `before?`, `after?` (ISO), `includeService?`, `includeDocumentText?` | messages of one chat, chronological, with media facts (`media.facts` is `basic` for messages archived before 2026-09-10), `deletedAt`, `edits`, `editedAt`; with `includeDocumentText` each document's full text rides in `media.documentText.text`; with `includeService` the service rows too, each with a readable `text` ("Fazil added Fedor") and a structured `event` |
+| `get_chat_messages` | `account`, `chat`, `limit?` (1–500), `before?`, `after?` (ISO), `includeService?`, `includeDocumentText?` | messages of one chat, chronological, with media facts (`media.facts` is `basic` for messages archived before 2026-09-10), `deletedAt` + `deletedReason`, `read` (and `readByRecipient` on your own messages), `edits`, `editedAt`; with `includeDocumentText` each document's full text rides in `media.documentText.text`; with `includeService` the service rows too, each with a readable `text` ("Fazil added Fedor") and a structured `event` |
 | `search_messages` | `query`, `account?`, `chat?`, `folder?`, `sender?`, `before?`, `after?`, `includeService?`, `includeDocumentText?`, `limit?` (1–200) | `{ hits, scanned, total, partial }`; each hit says `matchedIn` (text, sender, fileName, document, transcript) with a `snippet` |
 | `get_message_history` | `account`, `chat`, `msgId` | every archived version of one message, oldest first, plus the current one; `versionsKeptSince` and a `note` when an edited message has no captured earlier wording |
 | `get_media` | `account`, `chat`, `msgId` | the file's facts, then a photo as an image, a voice message as audio plus transcript, a document as its extracted text (PDF, Word, Excel, plain text) |
@@ -109,9 +109,25 @@ matches several chats is refused with the candidates listed, so pass the id. Ser
 added, left or removed, renames, pins) are excluded unless `includeService` is set; since 2026-09-15
 each says what happened, in `text` and in `event` (`kind`, `by`, `members` with names), and
 `list_chat_members` gives a group's whole member list. A message Telegram deleted is still returned,
-marked with `deletedAt`; a message that was edited carries `edits`, and `get_message_history` returns
+marked with `deletedAt` and `deletedReason` — `ttl` when the chat's disappearing-message timer did it,
+`manual` when somebody did, `unknown` when it cannot be told apart. Nothing is ever removed from the
+archive, a timer included. A message that was edited carries `edits`, and `get_message_history` returns
 what it said before. `historyComplete: false` on a chat means the archive is still filling that chat's
 history back to its first message; `historyFrom` is how far back it currently reaches.
+
+Telegram renames a deleted account to "Deleted Account" everywhere, retroactively, so a person who
+negotiated a deal in 2023 becomes anonymous in the archive the day they close their account. Where
+that has happened, messages and member rows carry `lastKnownName`, `lastKnownUsername` and
+`lastKnownAt` — the last identity that id was ever seen under anywhere this bundle reaches. All three
+`null` means the archive never saw one, not that it did not look.
+
+Read state and disappearing-message timers come from the dialog list, which the server re-reads every
+couple of minutes and at every full check; each answer carries the `seenAt` it was true at, and a chat
+whose state has never been observed answers `null` rather than zero. `mediaPolicy` is how much of a
+chat's media the archive keeps — `all`, `documentsOnly`, `textOnly` or `none`, set by an admin in the
+console. Under anything but `all` a message still carries its text and the file's name, type and
+declared size, and `media.saved` is `false` with `skippedByPolicy` naming the rule: not a failed
+download.
 
 ### 6. Security model, in one paragraph
 

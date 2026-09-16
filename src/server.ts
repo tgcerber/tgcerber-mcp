@@ -18,7 +18,10 @@ export function createServer(vault: Vault, version: string): McpServer {
         'Two error channels, by MCP convention: a malformed call is a protocol error and nothing ran; an answer about the archive ("no such chat", "several chats match", "no such message") is a tool result with isError=true and a message you can act on.',
         'Limits differ on purpose: get_chat_messages accepts limit 1–500, search_messages 1–200.',
         'A photo never has a fileName. media.facts="basic" means the message was archived before file facts were kept, so a missing name, transcript or text says nothing about the file.',
-        'A deleted message is still returned, with deletedAt; an edited one carries edits and editedAt, and get_message_history returns the earlier wordings captured since 2026-09-10.',
+        'A deleted message is still returned, with deletedAt and deletedReason (ttl = the disappearing-message timer on the chat, manual = somebody deleted it, unknown = not decidable); nothing is ever removed from the archive, a timer included. An edited one carries edits and editedAt, and get_message_history returns the earlier wordings captured since 2026-09-10.',
+        'Telegram renames a deleted account to "Deleted Account" everywhere and retroactively. Where that has happened the archive answers with lastKnownName, lastKnownUsername and lastKnownAt — the last identity that id was ever seen under in any archive this bridge covers. All three null means the archive never saw one, not that it did not look.',
+        'Read state and disappearing-message timers come from the dialog list, re-read every couple of minutes and by every full check; each answer carries the seenAt it was true at. A chat whose state has never been observed answers null rather than zero.',
+        'Media retention is a per-chat setting (mediaPolicy on list_chats): all, documentsOnly, textOnly or none. Under anything but all a message still carries its text and the name, type and declared size of the file, and media.saved is false with the policy named — it is not a failed download.',
         'Group membership: list_chat_members returns everyone in a group (silent members included) with role, join date and inviter as of the last full check (capturedAt), plus former members and the joins/leaves seen since. Service rows (includeService=true) say what happened in `text` and structured in `event` (kind member_added / member_left / member_removed / chat_renamed / photo_changed / message_pinned / …); rows archived before 2026-09-15 have an empty text.',
       ].join('\n'),
     },
@@ -58,7 +61,10 @@ export function createServer(vault: Vault, version: string): McpServer {
     {
       description:
         "The Telegram accounts this bridge can read, with each archive's state: message count, size, when it last " +
-        'received a message, and — while a sweep is filling it — how many chats of how many have been read.',
+        'received a message, and — while a sweep is filling it — how many chats of how many have been read. ' +
+        'archive.messages and archive.media are the same counts list_chats reports, so they add up; ' +
+        'archive.sealedObjects is the raw number of objects in the vault, which is larger because it counts every ' +
+        'version of an edited message, member-list snapshots and service rows.',
       inputSchema: {},
     },
     async () => guarded(() => vault.listAccounts()),
@@ -80,10 +86,23 @@ export function createServer(vault: Vault, version: string): McpServer {
         'Chats in the archive, newest first, with their Telegram folders, message/media/deleted/edited counts, the oldest ' +
         'archived message, whether the history is complete back to the first message (historyComplete=false means the ' +
         'archive is still being filled for that chat) and, for groups, the member count of the last recorded member list ' +
-        '(`members`, null when none is recorded yet). Optionally limited to one account or one folder.',
-      inputSchema: { account: account.optional(), folder: folder.optional() },
+        '(`members`, null when none is recorded yet). Also per chat: `autoDelete` — Telegram\'s disappearing-message ' +
+        'timer ({enabled, seconds, seenAt}; {enabled:false} when off; null when the archive has never looked) — ' +
+        '`unread` ({count, mentions, lastReadMsgId, lastReadAt, seenAt}, null when never looked), and `mediaPolicy`, ' +
+        "how much of this chat's media the archive keeps. Optionally limited to one account, one folder, or chats with " +
+        'unread messages.',
+      inputSchema: {
+        account: account.optional(),
+        folder: folder.optional(),
+        unreadOnly: z
+          .boolean()
+          .optional()
+          .describe(
+            'Only chats with unread messages, or marked unread by hand. Chats whose read state the archive has never observed are left out — their unread is null, not zero.',
+          ),
+      },
     },
-    async ({ account, folder }) => guarded(() => vault.listChats(account, folder)),
+    async ({ account, folder, unreadOnly }) => guarded(() => vault.listChats(account, folder, { unreadOnly })),
   );
 
   server.registerTool(

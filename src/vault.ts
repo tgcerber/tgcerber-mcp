@@ -17,6 +17,16 @@
  * TG Cerber repository), so a prompt written against one mode works against the other.
  */
 import { createRequire } from 'node:module';
+import {
+  autoDeleteView,
+  type AutoDeleteView,
+  type ChatStates,
+  deletionReason,
+  type MediaPolicy,
+  readState,
+  type UnreadView,
+  unreadView,
+} from './chat-state.js';
 
 // The package's ESM entry references a file it does not ship; its CommonJS build is complete.
 const require = createRequire(import.meta.url);
@@ -51,6 +61,15 @@ export interface Account {
   objects: Record<string, string>;
   /** Per chat, whether a sweep has read the history down to the first message. Bundle v2. */
   coverage?: Record<string, { complete: boolean }>;
+  /**
+   * Per chat, what Telegram says about the DIALOG rather than about its messages: the auto-delete
+   * timer, the unread counters and the read markers, each stamped with when it was observed.
+   * Absent on a server that has never read a dialog list for this account, in which case
+   * `autoDelete` and `unread` answer null rather than guessing.
+   */
+  chatState?: ChatStates;
+  /** The account's own Telegram user id, so a message can be told outgoing on older records. */
+  telegramUserId?: string | null;
   archive?: ArchiveStatus;
 }
 
@@ -73,6 +92,11 @@ export interface ManifestEntry {
   /** Text and sender on the manifest (since 2026-09-10); absent means "open the record". */
   text?: string;
   sender?: string | null;
+  /** The sender's Telegram id and @handle, on manifests written since 2026-09-16. */
+  senderId?: number | null;
+  senderUsername?: string | null;
+  /** True when the account owner sent it. Absent on manifests written before 2026-09-16. */
+  outgoing?: boolean;
   mediaType?: string | null;
   fileName?: string | null;
   editDate?: string | null;
@@ -130,7 +154,7 @@ export interface MembersSnapshot {
   members: MemberRecord[];
 }
 
-export interface MemberView extends MemberRecord {
+export interface MemberView extends MemberRecord, Partial<LastKnownIdentity> {
   status: 'current' | 'left';
   source: 'snapshot' | 'event';
   leftAt?: string;
@@ -194,6 +218,8 @@ export interface MessageRecord {
   text: string;
   sender: string | null;
   senderId?: number | null;
+  senderUsername?: string | null;
+  outgoing?: boolean;
   replyToId?: number | null;
   editDate?: string | null;
   capturedAt?: string | null;
@@ -202,6 +228,8 @@ export interface MessageRecord {
   mediaBytes?: number;
   mediaSaved?: boolean;
   mediaError?: boolean;
+  /** The retention policy that kept this file out of the vault, when one did. */
+  mediaSkipped?: MediaPolicy;
   fileName?: string | null;
   mimeType?: string | null;
   fileSize?: number | null;
@@ -237,6 +265,16 @@ export interface ChatSummary {
   historyComplete: boolean | null;
   /** Members in the last recorded member list of a group; null when none is recorded. */
   members: number | null;
+  /**
+   * Telegram's auto-delete timer on this chat as the archive last saw it — `{enabled:false}` when
+   * it is off, and null when the archive has never looked, which is not the same claim. The archive
+   * keeps its copy either way; `deletedAt` / `deletedReason` say what Telegram did.
+   */
+  autoDelete: AutoDeleteView | null;
+  /** What the owner has not read here, as of `seenAt`; null when the archive has never looked. */
+  unread: UnreadView | null;
+  /** How much of this chat's media the archive keeps, and which rule decided. */
+  mediaPolicy: { policy: MediaPolicy; source: string } | null;
 }
 
 export interface MediaInfo {
@@ -249,6 +287,8 @@ export interface MediaInfo {
   bytes: number | null;
   declaredBytes: number | null;
   saved: boolean;
+  /** Not saved because the chat's retention policy says so — nothing failed. */
+  skippedByPolicy?: MediaPolicy;
   duration?: number;
   width?: number;
   height?: number;
@@ -260,7 +300,21 @@ export interface MediaInfo {
   transcriptUnavailable?: string;
 }
 
-export interface Message {
+/**
+ * What the archive still knows about a person Telegram has stopped naming.
+ *
+ * Telegram replaces a deleted account's name and username with "Deleted Account", for everybody,
+ * retroactively. These carry the last name and handle that id was ever observed under, anywhere in
+ * the archives this bundle covers. All three are null together when there is no such observation —
+ * an answer, not a gap.
+ */
+export interface LastKnownIdentity {
+  lastKnownName: string | null;
+  lastKnownUsername: string | null;
+  lastKnownAt: string | null;
+}
+
+export interface Message extends Partial<LastKnownIdentity> {
   account: string;
   accountName: string;
   chat: string;
@@ -270,6 +324,16 @@ export interface Message {
   date: string | null;
   sender: string | null;
   senderId?: number | null;
+  senderUsername?: string | null;
+  /** True when the account owner sent it. */
+  outgoing?: boolean;
+  /**
+   * Whether the account owner has read this message; absent when the archive has never read the
+   * chat's read markers. Always true for a message they sent — `readByRecipient` is the question
+   * that is actually interesting about those.
+   */
+  read?: boolean;
+  readByRecipient?: boolean;
   type: string;
   text: string;
   replyToId?: number | null;
@@ -278,6 +342,13 @@ export interface Message {
   /** On a service row: what happened, structured; `text` is the sentence. */
   event?: ServiceEvent;
   deletedAt?: string;
+  /**
+   * Why it is gone from Telegram: the chat's auto-delete timer (`ttl`), somebody's hand (`manual`),
+   * or not decidable (`unknown`). Telegram attributes nothing, so this is inferred from how long the
+   * message lived against the timer the chat carries; `manual` is asserted only when the timer
+   * cannot have done it.
+   */
+  deletedReason?: 'ttl' | 'manual' | 'unknown';
   edits?: number;
   editedAt?: string;
 }
@@ -350,6 +421,13 @@ interface AccountState {
 export class Vault {
   private readonly states = new Map<string, AccountState>();
   private readonly records = new Map<string, Promise<MessageRecord | null>>();
+  /**
+   * The last name and handle every Telegram id was ever seen under, across every archive in this
+   * bundle. Shared across accounts on purpose: a colleague who deleted their account is anonymous
+   * in one employee's archive and named in another's, and the organization owns both. Only ever
+   * added to, so a rebuild of one account cannot forget what another one taught it.
+   */
+  private readonly identities = new Map<number, { name: string | null; username: string | null; at: string | null }>();
   private fetchedAt = Date.now();
   private refreshing: Promise<void> | null = null;
 
@@ -379,15 +457,42 @@ export class Vault {
     return [...this.states.values()].map(s => s.account);
   }
 
-  async listAccounts(): Promise<Array<{ account: string; name: string; phoneNumber: string; objects: number; archive: ArchiveStatus | null }>> {
+  /**
+   * The accounts in this bundle, with counts that agree with what the other tools return.
+   *
+   * `archive.messages` used to be the server's row, which counts sealed OBJECTS — re-seals, every
+   * version of an edited message, member snapshots and service rows included — while
+   * `list_chats.messages` counts conversation messages after folding. The two disagreed by more
+   * than four times on a real account (test report 2026-09-16). Both numbers here now come from the
+   * same aggregation `list_chats` uses; the server's raw count stays beside them as `sealedObjects`.
+   */
+  async listAccounts(): Promise<
+    Array<{
+      account: string;
+      name: string;
+      phoneNumber: string;
+      objects: number;
+      chats: number;
+      archive: (ArchiveStatus & { sealedObjects?: number }) | null;
+    }>
+  > {
     await this.maybeRefresh();
-    return this.accounts.map(a => ({
-      account: a.employeeId,
-      name: a.name,
-      phoneNumber: a.phoneNumber,
-      objects: Object.keys(a.objects).length,
-      archive: a.archive ?? null,
-    }));
+    const out = [];
+    for (const acc of this.accounts) {
+      const chats = await this.chatSummaries(acc);
+      const messages = chats.reduce((sum, c) => sum + c.messages, 0);
+      const media = chats.reduce((sum, c) => sum + c.media, 0);
+      const row = acc.archive ?? null;
+      out.push({
+        account: acc.employeeId,
+        name: acc.name,
+        phoneNumber: acc.phoneNumber,
+        objects: Object.keys(acc.objects).length,
+        chats: chats.length,
+        archive: row ? { ...row, messages, media, sealedObjects: row.messages + row.media } : null,
+      });
+    }
+    return out;
   }
 
   async listFolders(account?: string): Promise<Array<{ account: string; accountName: string; folder: string; chats: number }>> {
@@ -404,68 +509,134 @@ export class Vault {
     return out.sort((a, b) => a.accountName.localeCompare(b.accountName) || a.folder.localeCompare(b.folder));
   }
 
-  async listChats(account?: string, folder?: string): Promise<ChatSummary[]> {
+  async listChats(account?: string, folder?: string, opts: { unreadOnly?: boolean } = {}): Promise<ChatSummary[]> {
     await this.maybeRefresh();
     const selected = account ? [this.resolveAccount(account)] : this.accounts;
     const out: ChatSummary[] = [];
     for (const acc of selected) {
-      const entries = await this.entriesFor(acc);
-      const chats = new Map<string, ChatSummary & { lastMs: number; firstMs: number; membersMs: number }>();
-      for (const e of entries) {
-        const key = chatKey(e);
-        let chat = chats.get(key);
-        if (!chat) {
-          const meta = this.state(acc).chats[key];
-          chat = {
-            account: acc.employeeId,
-            accountName: acc.name,
-            chat: key,
-            title: meta?.title || e.chatTitle || 'Chat',
-            type: meta?.type ?? e.chatType ?? null,
-            folders: meta?.folders ?? [],
-            archived: meta?.archived ?? false,
-            messages: 0,
-            media: 0,
-            deleted: 0,
-            edited: 0,
-            historyFrom: null,
-            lastAt: null,
-            historyComplete: acc.coverage ? (acc.coverage[key]?.complete ?? false) : null,
-            members: null,
-            lastMs: 0,
-            firstMs: Number.MAX_SAFE_INTEGER,
-            membersMs: -1,
-          };
-          chats.set(key, chat);
-        }
-        if (e.type === 'members') {
-          const ms = e.date ? Date.parse(e.date) || 0 : 0;
-          if (ms >= chat.membersMs) {
-            chat.membersMs = ms;
-            chat.members = typeof e.members === 'number' ? e.members : chat.members;
-          }
-          continue;
-        }
-        if (e.type !== 'service') chat.messages += 1;
-        if (e.mediaKey) chat.media += 1;
-        if (e.deletedAt) chat.deleted += 1;
-        if (e.versions?.length) chat.edited += 1;
-        const ms = e.date ? Date.parse(e.date) || 0 : 0;
-        if (ms > chat.lastMs) {
-          chat.lastMs = ms;
-          chat.lastAt = e.date ?? null;
-        }
-        if (ms && ms < chat.firstMs) {
-          chat.firstMs = ms;
-          chat.historyFrom = e.date ?? null;
-        }
-      }
-      for (const { lastMs: _l, firstMs: _f, membersMs: _m, ...chat } of chats.values()) {
+      for (const chat of await this.chatSummaries(acc)) {
         if (folder && !chat.folders.some(f => f.toLowerCase() === folder.trim().toLowerCase())) continue;
+        // A chat the owner marked unread by hand counts as unread even at zero, which is what the
+        // mark is for; a chat whose read state was never observed is not claimed either way.
+        if (opts.unreadOnly && !(chat.unread && (chat.unread.count > 0 || chat.unread.manuallyUnread))) continue;
         out.push(chat);
       }
     }
     return out.sort((a, b) => Date.parse(b.lastAt ?? '') - Date.parse(a.lastAt ?? '') || a.title.localeCompare(b.title));
+  }
+
+  /**
+   * One account's chats, aggregated. The single place a chat's counts are computed, so `list_chats`
+   * and `list_accounts` cannot disagree about how many messages an archive holds.
+   */
+  private async chatSummaries(acc: Account): Promise<ChatSummary[]> {
+    const entries = await this.entriesFor(acc);
+    const chatState = acc.chatState ?? {};
+    const chats = new Map<
+      string,
+      ChatSummary & { lastMs: number; firstMs: number; membersMs: number; dates: Map<number, string> }
+    >();
+    for (const e of entries) {
+      const key = chatKey(e);
+      let chat = chats.get(key);
+      if (!chat) {
+        const meta = this.state(acc).chats[key];
+        const state = chatState[key];
+        chat = {
+          account: acc.employeeId,
+          accountName: acc.name,
+          chat: key,
+          title: meta?.title || e.chatTitle || 'Chat',
+          type: meta?.type ?? e.chatType ?? null,
+          folders: meta?.folders ?? [],
+          archived: meta?.archived ?? false,
+          messages: 0,
+          media: 0,
+          deleted: 0,
+          edited: 0,
+          historyFrom: null,
+          lastAt: null,
+          historyComplete: acc.coverage ? (acc.coverage[key]?.complete ?? false) : null,
+          members: null,
+          autoDelete: autoDeleteView(state),
+          unread: null,
+          mediaPolicy: state?.policy ? { policy: state.policy, source: state.policyFrom ?? 'none' } : null,
+          lastMs: 0,
+          firstMs: Number.MAX_SAFE_INTEGER,
+          membersMs: -1,
+          dates: new Map(),
+        };
+        chats.set(key, chat);
+      }
+      if (e.type === 'members') {
+        const ms = e.date ? Date.parse(e.date) || 0 : 0;
+        if (ms >= chat.membersMs) {
+          chat.membersMs = ms;
+          chat.members = typeof e.members === 'number' ? e.members : chat.members;
+        }
+        continue;
+      }
+      if (e.type !== 'service') chat.messages += 1;
+      if (e.mediaKey) chat.media += 1;
+      if (e.deletedAt) chat.deleted += 1;
+      if (e.versions?.length) chat.edited += 1;
+      if (e.msgId != null && e.date) chat.dates.set(e.msgId, e.date);
+      const ms = e.date ? Date.parse(e.date) || 0 : 0;
+      if (ms > chat.lastMs) {
+        chat.lastMs = ms;
+        chat.lastAt = e.date ?? null;
+      }
+      if (ms && ms < chat.firstMs) {
+        chat.firstMs = ms;
+        chat.historyFrom = e.date ?? null;
+      }
+    }
+    // A chat Telegram lists but the archive holds nothing from yet — one with an auto-delete timer
+    // that emptied before the first sweep reached it — still has state worth answering with.
+    for (const [key, state] of Object.entries(chatState)) {
+      if (chats.has(key)) continue;
+      const meta = this.state(acc).chats[key];
+      if (!meta) continue;
+      chats.set(key, {
+        account: acc.employeeId,
+        accountName: acc.name,
+        chat: key,
+        title: meta.title || key,
+        type: meta.type ?? null,
+        folders: meta.folders ?? [],
+        archived: meta.archived ?? false,
+        messages: 0,
+        media: 0,
+        deleted: 0,
+        edited: 0,
+        historyFrom: null,
+        lastAt: null,
+        historyComplete: acc.coverage ? (acc.coverage[key]?.complete ?? false) : null,
+        members: null,
+        autoDelete: autoDeleteView(state),
+        unread: null,
+        mediaPolicy: state.policy ? { policy: state.policy, source: state.policyFrom ?? 'none' } : null,
+        lastMs: 0,
+        firstMs: Number.MAX_SAFE_INTEGER,
+        membersMs: -1,
+        dates: new Map(),
+      });
+    }
+    const out: ChatSummary[] = [];
+    for (const [key, chat] of chats) {
+      const { lastMs: _l, firstMs: _f, membersMs: _m, dates, ...summary } = chat;
+      const unread = unreadView(chatState[key]);
+      if (unread) {
+        // When the last-read message is itself in the archive we can say WHEN it was sent, which is
+        // what turns "12 unread" into "nothing since Tuesday".
+        summary.unread = {
+          ...unread,
+          lastReadAt: unread.lastReadMsgId ? (dates.get(unread.lastReadMsgId) ?? null) : null,
+        };
+      }
+      out.push(summary);
+    }
+    return out;
   }
 
   async getMessages(
@@ -608,6 +779,9 @@ export class Vault {
     const snapshots = (await mapLimit(snapshotEntries.slice(-30), e => this.recordFor(acc, e.msgKey) as Promise<MembersSnapshot | null>)).filter(
       (s): s is MembersSnapshot => Boolean(s && Array.isArray(s.members)),
     );
+    for (const snap of snapshots) {
+      for (const m of snap.members) this.noteIdentity(m.id, m.name, m.username, snap.capturedAt);
+    }
     const latest = snapshots[snapshots.length - 1] ?? null;
     const capturedAt = latest?.capturedAt ?? null;
     const capturedMs = capturedAt ? Date.parse(capturedAt) : Number.NEGATIVE_INFINITY;
@@ -616,8 +790,11 @@ export class Vault {
     const serviceRecords = await mapLimit(serviceEntries, e => this.recordFor(acc, e.msgKey));
     const events: Array<{ record: MessageRecord; event: ServiceEvent; ms: number }> = [];
     serviceRecords.forEach((r, i) => {
-      if (!r?.event || !MEMBERSHIP_KINDS.has(r.event.kind)) return;
+      if (!r?.event) return;
       const date = r.date ?? serviceEntries[i]!.date ?? null;
+      this.noteIdentity(r.event.byId, r.event.by, null, date);
+      for (const person of r.event.members ?? []) this.noteIdentity(person.id, person.name, person.username, date);
+      if (!MEMBERSHIP_KINDS.has(r.event.kind)) return;
       events.push({ record: r, event: r.event, ms: date ? Date.parse(date) || 0 : 0 });
     });
 
@@ -670,8 +847,10 @@ export class Vault {
       total: latest?.total ?? null,
       truncated: latest?.truncated ?? false,
       ...(latest?.unavailable ? { unavailable: latest.unavailable } : {}),
-      members: [...current.values()].sort(byRole),
-      former: [...former.values()].sort((a, b) => leftMs(b) - leftMs(a) || (a.name ?? '').localeCompare(b.name ?? '')),
+      members: [...current.values()].sort(byRole).map(m => this.named(m)),
+      former: [...former.values()]
+        .sort((a, b) => leftMs(b) - leftMs(a) || (a.name ?? '').localeCompare(b.name ?? ''))
+        .map(m => this.named(m)),
       changesSince,
     };
     if (!latest) {
@@ -847,6 +1026,8 @@ export class Vault {
         }
       }
     }
+    for (const e of all) this.noteIdentity(e.senderId, e.sender, e.senderUsername, e.date);
+
     await this.learnLegacyIds(acc, all);
     state.entries = foldVersions(all, e => deletedInChat.get(`${e.chatId}:${e.msgId}`) ?? (e.msgId != null ? deletedAnywhere.get(e.msgId) : undefined) ?? null);
     state.stale = false;
@@ -861,7 +1042,9 @@ export class Vault {
     if (!legacy.length) return;
     const records = await mapLimit(legacy, e => this.recordFor(acc, e.msgKey));
     records.forEach((r, i) => {
-      if (!r || typeof r.msgId !== 'number') return;
+      if (!r) return;
+      this.noteIdentity(r.senderId, r.sender, r.senderUsername, r.date);
+      if (typeof r.msgId !== 'number') return;
       legacy[i]!.msgId = r.msgId;
       if (r.editDate !== undefined) legacy[i]!.editDate = r.editDate;
     });
@@ -890,6 +1073,12 @@ export class Vault {
   private toMessage(acc: Account, e: ManifestEntry, r: MessageRecord, includeDocumentText = false): Message {
     const key = chatKey(e);
     const meta = this.state(acc).chats[key];
+    const state = acc.chatState?.[key];
+    const date = r.date ?? e.date ?? null;
+    const senderId = typeof r.senderId === 'number' ? r.senderId : typeof e.senderId === 'number' ? e.senderId : null;
+    const outgoing =
+      r.outgoing ?? e.outgoing ?? (senderId !== null && acc.telegramUserId ? String(senderId) === acc.telegramUserId : false);
+    const read = readState(state, { msgId: r.msgId, outgoing });
     return {
       account: acc.employeeId,
       accountName: acc.name,
@@ -897,19 +1086,94 @@ export class Vault {
       chatTitle: meta?.title || r.chatTitle || e.chatTitle,
       ...(meta?.folders.length ? { folders: meta.folders } : {}),
       msgId: r.msgId,
-      date: r.date ?? e.date ?? null,
+      date,
       sender: r.sender,
-      ...(typeof r.senderId === 'number' ? { senderId: r.senderId } : {}),
+      ...(senderId !== null ? { senderId } : {}),
+      ...(r.senderUsername ? { senderUsername: r.senderUsername } : {}),
+      // Only for a sender Telegram no longer names — otherwise every message would carry three
+      // fields repeating what `sender` already says.
+      ...(isAnonymousSender(r.sender) ? this.lastKnownFor(senderId) : {}),
+      ...(outgoing ? { outgoing: true } : {}),
+      ...(read ?? {}),
       type: r.type,
       text: r.text ?? '',
       ...(typeof r.replyToId === 'number' ? { replyToId: r.replyToId } : {}),
       ...(r.mediaType ? { mediaType: r.mediaType, media: mediaInfo(r, includeDocumentText) } : {}),
       ...(r.event ? { event: r.event } : {}),
-      ...(e.deletedAt ? { deletedAt: e.deletedAt } : {}),
+      ...(e.deletedAt
+        ? {
+            deletedAt: e.deletedAt,
+            deletedReason: deletionReason({ sentAt: date, deletedAt: e.deletedAt, autoDelete: autoDeleteView(state) }),
+          }
+        : {}),
       ...(e.versions?.length ? { edits: e.versions.length } : {}),
       ...(r.editDate ? { editedAt: r.editDate } : {}),
     };
   }
+
+  /**
+   * The last name and handle an id was ever observed under, or three nulls when there is none.
+   *
+   * Three nulls rather than an absent field: "this person was already anonymous everywhere the
+   * bundle reaches" is an answer an investigator needs to see, and an absent field reads as
+   * "not checked".
+   */
+  private lastKnownFor(senderId: number | null): LastKnownIdentity {
+    const known = senderId === null ? undefined : this.identities.get(senderId);
+    return {
+      lastKnownName: known?.name ?? null,
+      lastKnownUsername: known?.username ?? null,
+      lastKnownAt: known && (known.name || known.username) ? known.at : null,
+    };
+  }
+
+  /** A member row named from what the rest of the archive remembers, when Telegram will not name them. */
+  private named(member: MemberView): MemberView {
+    if (!isAnonymousSender(member.name) && !member.deleted) return member;
+    return { ...member, ...this.lastKnownFor(member.id) };
+  }
+
+  /**
+   * Records that this id was seen under this name at this time, if it is better than what is held.
+   *
+   * "Better" is newer, and only a real name counts: an observation of "Deleted Account" carries no
+   * information and must never overwrite the name from 2023 that does. The username is tracked
+   * separately because Telegram drops it before the name in some states.
+   */
+  private noteIdentity(senderId: unknown, name: unknown, username: unknown, at: unknown): void {
+    if (typeof senderId !== 'number' || !Number.isFinite(senderId)) return;
+    const realName = typeof name === 'string' && !isAnonymousSender(name) ? name : null;
+    const handle = typeof username === 'string' && username.trim() ? username.trim() : null;
+    if (!realName && !handle) return;
+    const when = typeof at === 'string' && at ? at : null;
+    const held = this.identities.get(senderId);
+    if (!held) {
+      this.identities.set(senderId, { name: realName, username: handle, at: when });
+      return;
+    }
+    const newer = !held.at || (when !== null && when >= held.at);
+    this.identities.set(senderId, {
+      name: realName && (newer || !held.name) ? realName : held.name,
+      username: handle && (newer || !held.username) ? handle : held.username,
+      at: when && (newer || !held.at) ? when : held.at,
+    });
+  }
+}
+
+/**
+ * Is this the name Telegram gives someone it will not name?
+ *
+ * Telegram does not blank a deleted account's name, it REPLACES it — with a fixed phrase, the same
+ * one for everybody, in the interface language of whoever is looking. A name matching the phrase
+ * therefore carries no information, and is the signal to go looking for what the archive remembers
+ * instead. The Russian form is here because the monitoring session's own language decides which one
+ * Telegram sent us.
+ */
+export function isAnonymousSender(name: unknown): boolean {
+  if (typeof name !== 'string') return true;
+  const trimmed = name.trim();
+  if (!trimmed) return true;
+  return /^(deleted account|удал[её]нный аккаунт)$/i.test(trimmed);
 }
 
 // ---- crypto ----
@@ -1027,6 +1291,7 @@ export function mediaInfo(r: MessageRecord, includeDocumentText = false): MediaI
     bytes: saved ? (r.mediaBytes ?? null) : null,
     declaredBytes: r.fileSize ?? null,
     saved,
+    ...(r.mediaSkipped ? { skippedByPolicy: r.mediaSkipped } : {}),
     ...(r.duration !== undefined ? { duration: r.duration } : {}),
     ...(r.width !== undefined && r.height !== undefined ? { width: r.width, height: r.height } : {}),
     ...(r.isRound ? { isRound: true } : {}),

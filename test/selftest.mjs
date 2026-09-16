@@ -129,6 +129,11 @@ const server = createServer((req, res) => {
           manifests: [urlFor(manifestKey)],
           objects: Object.fromEntries(Object.keys(objects).filter(k => k !== manifestKey).map(k => [k, urlFor(k)])),
           coverage: { '42': { complete: true }, '99': { complete: false } },
+          telegramUserId: '7',
+          chatState: {
+            '99': { at: '2026-09-16T10:00:00.000Z', ttl: 86400, unread: 0, policy: 'textOnly', policyFrom: 'auto' },
+            '42': { at: '2026-09-16T10:00:00.000Z', ttl: 0, unread: 2, mentions: 1, lastReadIn: 1, lastReadOut: 2 },
+          },
           archive: { status: 'idle', messages: 5, media: 2, bytes: 40, lastBackupAt: null, updatedAt: '2026-09-02T09:02:00Z', liveArchive: true },
         },
       ],
@@ -199,6 +204,8 @@ const session = await run([], {}, [
   { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'list_chat_members', arguments: { account: 'e', chat: '99' } } },
   { jsonrpc: '2.0', id: 14, method: 'tools/call', params: { name: 'get_chat_messages', arguments: { account: 'e', chat: '99', limit: 10, includeService: true } } },
   { jsonrpc: '2.0', id: 15, method: 'tools/call', params: { name: 'list_chat_members', arguments: { account: 'e', chat: '42' } } },
+  { jsonrpc: '2.0', id: 16, method: 'tools/call', params: { name: 'list_chats', arguments: { unreadOnly: true } } },
+  { jsonrpc: '2.0', id: 17, method: 'tools/call', params: { name: 'list_accounts', arguments: {} } },
 ]);
 const replies = Object.fromEntries(
   session.out
@@ -259,4 +266,23 @@ check(
 check('a private chat has no member list', replies[15]?.result?.isError === true && /private chat/.test(replies[15]?.result?.content?.[0]?.text ?? ''), JSON.stringify(replies[15]?.result));
 
 server.close();
+// The 2026-09-16 review: the dialog facts the archive used to drop.
+const timed = chats.find(c => c.chat === '99');
+const direct = chats.find(c => c.chat === '42');
+check(
+  'the auto-delete timer is reported, and being off is told apart from never having looked',
+  timed?.autoDelete?.enabled === true && timed.autoDelete.seconds === 86400 && direct?.autoDelete?.enabled === false,
+  JSON.stringify([timed?.autoDelete, direct?.autoDelete]),
+);
+check('the retention policy in force is shown per chat', timed?.mediaPolicy?.policy === 'textOnly' && timed.mediaPolicy.source === 'auto', JSON.stringify(timed?.mediaPolicy));
+check('unread state is reported with what it was true at', direct?.unread?.count === 2 && direct.unread.mentions === 1 && typeof direct.unread.seenAt === 'string', JSON.stringify(direct?.unread));
+const unreadOnly = payload(16);
+check('unreadOnly keeps only the chats with something unread', Array.isArray(unreadOnly) && unreadOnly.length === 1 && unreadOnly[0].chat === '42', JSON.stringify(unreadOnly?.map(c => c.chat)));
+const listed = payload(17);
+check(
+  'account counts agree with list_chats, and the raw object count is reported beside them',
+  listed?.[0]?.archive?.messages === chats.reduce((sum, c) => sum + c.messages, 0) && listed[0].archive.sealedObjects === 7 && listed[0].chats === chats.length,
+  JSON.stringify(listed?.[0]?.archive),
+);
+
 process.exit(failures ? 1 : 0);
