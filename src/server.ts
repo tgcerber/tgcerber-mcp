@@ -17,7 +17,7 @@ export function createServer(vault: Vault, version: string): McpServer {
         'TG Cerber archive: read-only access to archived Telegram messages and files, decrypted on this machine.',
         'Two error channels, by MCP convention: a malformed call is a protocol error and nothing ran; an answer about the archive ("no such chat", "several chats match", "no such message") is a tool result with isError=true and a message you can act on.',
         'Limits differ on purpose: get_chat_messages accepts limit 1–500, search_messages 1–200.',
-        'get_chat_messages answers {messages, count, more, nextBefore, nextAfter}: the newest `limit` messages by default, older ones with `before`, newer ones with `after`. more=true means messages remain in the direction you are paging; pass nextBefore as `before` to keep going back, nextAfter as `after` to keep going forward, until it is null.',
+        'get_chat_messages answers {messages, count, more, nextBefore, nextAfter}: the newest `limit` messages by default, older ones with `before`, newer ones with `after`. more=true means messages remain in the direction you are paging; pass nextBefore as `before` to keep going back, nextAfter as `after` to keep going forward, until it is null. A page may exceed `limit` by the size of a same-second group (an album): messages sent in the same second are never split across pages.',
         'get_media reports media.sha256, the hex SHA-256 of the exact bytes it returns; null when it returns none (not saved, too large, kept out by policy).',
         'A photo never has a fileName. media.facts="basic" means the message was archived before file facts were kept, so a missing name, transcript or text says nothing about the file.',
         'A deleted message is still returned, with deletedAt and deletedReason (ttl = the disappearing-message timer on the chat, manual = somebody deleted it, unknown = not decidable); nothing is ever removed from the archive, a timer included. An edited one carries edits and editedAt, and get_message_history returns the earlier wordings captured since 2026-09-10.',
@@ -129,7 +129,8 @@ export function createServer(vault: Vault, version: string): McpServer {
         'Messages of one chat in chronological order, newest `limit` (1–500, default 50) by default; page back with `before`, ' +
         'forward with `after`. Returns {messages, count, more, nextBefore, nextAfter}: `more` is true when messages remain beyond ' +
         'this window in the paging direction; `nextBefore` is the timestamp to pass as `before` for the next older page, ' +
-        '`nextAfter` the one to pass as `after` for the next newer page, each null when nothing remains that way. Each ' +
+        '`nextAfter` the one to pass as `after` for the next newer page, each null when nothing remains that way. A page may ' +
+        'exceed `limit` by the size of a same-second group (an album): messages sent in the same second are never split. Each ' +
         'message carries its media facts (file name — never for photos —, MIME type, size, whether the file was saved, a voice ' +
         'transcript, a document\'s text length), `deletedAt` when Telegram deleted it (the archive keeps it), and `edits` when ' +
         'earlier versions exist (see get_message_history).',

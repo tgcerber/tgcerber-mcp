@@ -50,8 +50,15 @@ const messages = [
   { chatId: 77, chatTitle: 'Priya Mehta', chatType: 'user', msgId: 3, date: '2026-08-20T10:02:00Z', type: 'text', text: 'Great, I will bring the badges.', sender: 'Priya Mehta', senderId: 5 },
   { chatId: 77, chatTitle: 'Priya Mehta', chatType: 'user', msgId: 4, date: '2026-08-20T10:03:00Z', type: 'text', text: 'Thanks. Ask for Sam at the desk.', sender: 'Alex Kade', senderId: 1 },
   { chatId: 77, chatTitle: 'Priya Mehta', chatType: 'user', msgId: 5, date: '2026-08-20T10:04:00Z', type: 'text', text: 'Will do.', sender: 'Priya Mehta', senderId: 5 },
+  // A chat with a three-photo album, the three messages sharing one second, for paging in windows of two.
+  { chatId: 88, chatTitle: 'Omar Haddad', chatType: 'user', msgId: 1, date: '2026-08-10T08:00:00Z', type: 'text', text: 'Photos from the site visit:', sender: 'Omar Haddad', senderId: 6 },
+  { chatId: 88, chatTitle: 'Omar Haddad', chatType: 'user', msgId: 2, date: '2026-08-10T08:00:05Z', type: 'text', text: 'entrance', sender: 'Omar Haddad', senderId: 6 },
+  { chatId: 88, chatTitle: 'Omar Haddad', chatType: 'user', msgId: 3, date: '2026-08-10T08:00:05Z', type: 'text', text: 'lobby', sender: 'Omar Haddad', senderId: 6 },
+  { chatId: 88, chatTitle: 'Omar Haddad', chatType: 'user', msgId: 4, date: '2026-08-10T08:00:05Z', type: 'text', text: 'roof', sender: 'Omar Haddad', senderId: 6 },
+  { chatId: 88, chatTitle: 'Omar Haddad', chatType: 'user', msgId: 5, date: '2026-08-10T08:00:09Z', type: 'text', text: 'Looks good, thanks.', sender: 'Alex Kade', senderId: 1 },
 ];
 const PAGED = messages.filter(m => m.chatId === 77).map(m => m.date);
+const ALBUM = messages.filter(m => m.chatId === 88).map(m => m.date);
 const objects = {};
 const entries = messages.map((m, i) => {
   const msgKey = `org/o/emp/e/msg/${i + 1}.json`;
@@ -136,13 +143,13 @@ const server = createServer((req, res) => {
           phoneNumber: '+10000000000',
           manifests: [urlFor(manifestKey)],
           objects: Object.fromEntries(Object.keys(objects).filter(k => k !== manifestKey).map(k => [k, urlFor(k)])),
-          coverage: { '42': { complete: true }, '99': { complete: false }, '77': { complete: true } },
+          coverage: { '42': { complete: true }, '99': { complete: false }, '77': { complete: true }, '88': { complete: true } },
           telegramUserId: '7',
           chatState: {
             '99': { at: '2026-09-16T10:00:00.000Z', ttl: 86400, unread: 0, policy: 'textOnly', policyFrom: 'auto' },
             '42': { at: '2026-09-16T10:00:00.000Z', ttl: 0, unread: 2, mentions: 1, lastReadIn: 1, lastReadOut: 2 },
           },
-          archive: { status: 'idle', messages: 10, media: 2, bytes: 40, lastBackupAt: null, updatedAt: '2026-09-02T09:02:00Z', liveArchive: true },
+          archive: { status: 'idle', messages: 15, media: 2, bytes: 40, lastBackupAt: null, updatedAt: '2026-09-02T09:02:00Z', liveArchive: true },
         },
       ],
     });
@@ -220,6 +227,11 @@ const session = await run([], {}, [
   { jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'get_chat_messages', arguments: { account: 'e', chat: '77', limit: 2, before: PAGED[1] } } },
   { jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name: 'get_chat_messages', arguments: { account: 'e', chat: '77', limit: 2, after: PAGED[1] } } },
   { jsonrpc: '2.0', id: 22, method: 'tools/call', params: { name: 'get_chat_messages', arguments: { account: 'e', chat: '77', limit: 2, after: PAGED[3] } } },
+  // Paging the album chat in windows of two: the three same-second messages must travel together, back and forward.
+  { jsonrpc: '2.0', id: 23, method: 'tools/call', params: { name: 'get_chat_messages', arguments: { account: 'e', chat: '88', limit: 2 } } },
+  { jsonrpc: '2.0', id: 24, method: 'tools/call', params: { name: 'get_chat_messages', arguments: { account: 'e', chat: '88', limit: 2, before: ALBUM[1] } } },
+  { jsonrpc: '2.0', id: 25, method: 'tools/call', params: { name: 'get_chat_messages', arguments: { account: 'e', chat: '88', limit: 2, after: ALBUM[0] } } },
+  { jsonrpc: '2.0', id: 26, method: 'tools/call', params: { name: 'get_chat_messages', arguments: { account: 'e', chat: '88', limit: 2, after: ALBUM[3] } } },
 ]);
 const replies = Object.fromEntries(
   session.out
@@ -240,9 +252,9 @@ const payload = id => JSON.parse(replies[id]?.result?.content?.[0]?.text ?? 'nul
 check('initialize is answered', Boolean(replies[1]?.result?.serverInfo), JSON.stringify(replies[1]));
 check('eight tools are listed', replies[2]?.result?.tools?.length === 8 && replies[2].result.tools.some(t => t.name === 'list_chat_members'), JSON.stringify(replies[2]?.result?.tools?.map(t => t.name)));
 const search = payload(3);
-check('search finds the contract message and says what it scanned', search?.hits?.length === 1 && /contract/.test(search.hits[0].text) && search.hits[0].matchedIn === 'text' && search.scanned === 10 && search.partial === false, JSON.stringify(search));
+check('search finds the contract message and says what it scanned', search?.hits?.length === 1 && /contract/.test(search.hits[0].text) && search.hits[0].matchedIn === 'text' && search.scanned === 15 && search.partial === false, JSON.stringify(search));
 const chats = payload(4);
-check('chats are listed newest first, with folders, completeness and member counts', Array.isArray(chats) && chats.length === 3 && chats[0].title === 'Partners chat' && chats[0].folders[0] === 'Partners' && chats[0].historyComplete === false && chats[1].historyComplete === true && chats[0].members === 3 && chats[0].messages === 3 && chats[1].members === null && chats[2].chat === '77', JSON.stringify(chats));
+check('chats are listed newest first, with folders, completeness and member counts', Array.isArray(chats) && chats.length === 4 && chats[0].title === 'Partners chat' && chats[0].folders[0] === 'Partners' && chats[0].historyComplete === false && chats[1].historyComplete === true && chats[0].members === 3 && chats[0].messages === 3 && chats[1].members === null && chats[2].chat === '77', JSON.stringify(chats));
 const thread = payload(5);
 check(
   'a chat is read in order, with edits folded, in a page that says nothing more remains',
@@ -262,7 +274,7 @@ const folders = payload(10);
 check('folders are listed', Array.isArray(folders) && folders.length === 1 && folders[0].folder === 'Partners' && folders[0].chats === 1, JSON.stringify(folders));
 check('limit 0 is refused by the schema', replies[11]?.error?.code === -32602 || replies[11]?.result?.isError === true, JSON.stringify(replies[11]));
 const accounts = payload(12);
-check('accounts carry the archive state', accounts?.[0]?.archive?.messages === 10 && accounts[0].archive.liveArchive === true, JSON.stringify(accounts));
+check('accounts carry the archive state', accounts?.[0]?.archive?.messages === 15 && accounts[0].archive.liveArchive === true, JSON.stringify(accounts));
 const members = payload(13);
 check(
   'a group lists its members, the silent one included, and applies the leave seen after the snapshot',
@@ -294,6 +306,10 @@ pageIs('before nextBefore continues back by exactly one window', 19, '2,3', true
 pageIs('the last window back says nothing older remains', 20, '1', false, null, PAGED[0]);
 pageIs('after pages forward from the oldest side of the cutoff', 21, '3,4', true, PAGED[2], PAGED[3]);
 pageIs('the last window forward says nothing newer remains', 22, '5', false, PAGED[4], null);
+pageIs('a same-second album is never split: the newest window of two grows to hold all three', 23, '2,3,4,5', true, ALBUM[1], null);
+pageIs('paging back past the album loses nothing and repeats nothing', 24, '1', false, null, ALBUM[0]);
+pageIs('paging forward into the album grows the window to hold all three', 25, '2,3,4', true, ALBUM[1], ALBUM[3]);
+pageIs('paging forward past the album loses nothing and repeats nothing', 26, '5', false, ALBUM[4], null);
 check('a private chat has no member list', replies[15]?.result?.isError === true && /private chat/.test(replies[15]?.result?.content?.[0]?.text ?? ''), JSON.stringify(replies[15]?.result));
 
 server.close();
@@ -312,7 +328,7 @@ check('unreadOnly keeps only the chats with something unread', Array.isArray(unr
 const listed = payload(17);
 check(
   'account counts agree with list_chats, and the raw object count is reported beside them',
-  listed?.[0]?.archive?.messages === chats.reduce((sum, c) => sum + c.messages, 0) && listed[0].archive.sealedObjects === 12 && listed[0].chats === chats.length,
+  listed?.[0]?.archive?.messages === chats.reduce((sum, c) => sum + c.messages, 0) && listed[0].archive.sealedObjects === 17 && listed[0].chats === chats.length,
   JSON.stringify(listed?.[0]?.archive),
 );
 

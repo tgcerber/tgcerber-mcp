@@ -666,7 +666,12 @@ export class Vault {
     if (!Number.isNaN(afterMs)) scoped = scoped.filter(e => at(e) > afterMs);
     const forward = Number.isNaN(beforeMs) && !Number.isNaN(afterMs);
     const limit = clamp(opts.limit, 1, 500);
-    const window = forward ? scoped.slice(0, limit) : scoped.slice(-limit);
+    const second = (e: ManifestEntry): number => Math.floor(at(e) / 1000);
+    let start = forward ? 0 : Math.max(0, scoped.length - limit);
+    let end = forward ? Math.min(limit, scoped.length) : scoped.length;
+    while (start > 0 && second(scoped[start - 1]!) === second(scoped[start]!)) start--;
+    while (end < scoped.length && second(scoped[end]!) === second(scoped[end - 1]!)) end++;
+    const window = scoped.slice(start, end);
     const records = await mapLimit(window, e => this.recordFor(acc, e.msgKey));
     const messages = records.flatMap((r, i) => (r ? [this.toMessage(acc, window[i]!, r, opts.includeDocumentText)] : []));
     const first = window[0];
