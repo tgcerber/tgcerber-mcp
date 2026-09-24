@@ -16,6 +16,7 @@
  * This mirrors the server's cloud reader tool for tool (`b2b/backend/src/mcp/vault-reader.ts` in the
  * TG Cerber repository), so a prompt written against one mode works against the other.
  */
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
   autoDeleteView,
@@ -298,6 +299,7 @@ export interface MediaInfo {
   transcript?: string;
   transcriptPartial?: boolean;
   transcriptUnavailable?: string;
+  sha256?: string | null;
 }
 
 /**
@@ -351,6 +353,14 @@ export interface Message extends Partial<LastKnownIdentity> {
   deletedReason?: 'ttl' | 'manual' | 'unknown';
   edits?: number;
   editedAt?: string;
+}
+
+export interface MessagePage {
+  messages: Message[];
+  count: number;
+  more: boolean;
+  nextBefore: string | null;
+  nextAfter: string | null;
 }
 
 export interface SearchHit extends Message {
@@ -643,18 +653,27 @@ export class Vault {
     account: string,
     chat: string,
     opts: { limit: number; before?: string; after?: string; includeService?: boolean; includeDocumentText?: boolean },
-  ): Promise<Message[]> {
+  ): Promise<MessagePage> {
     await this.maybeRefresh();
     const acc = this.resolveAccount(account);
     const { entries } = await this.resolveChat(acc, chat);
     const beforeMs = opts.before ? Date.parse(opts.before) : Number.NaN;
     const afterMs = opts.after ? Date.parse(opts.after) : Number.NaN;
-    let scoped = entries.filter(e => isMessage(e) || (opts.includeService && e.type === 'service'));
-    if (!Number.isNaN(beforeMs)) scoped = scoped.filter(e => (e.date ? Date.parse(e.date) : 0) < beforeMs);
-    if (!Number.isNaN(afterMs)) scoped = scoped.filter(e => (e.date ? Date.parse(e.date) : 0) > afterMs);
-    const tail = scoped.sort(byTime).slice(-clamp(opts.limit, 1, 500));
-    const records = await mapLimit(tail, e => this.recordFor(acc, e.msgKey));
-    return records.flatMap((r, i) => (r ? [this.toMessage(acc, tail[i]!, r, opts.includeDocumentText)] : []));
+    const at = (e: ManifestEntry): number => (e.date ? Date.parse(e.date) : 0);
+    const all = entries.filter(e => isMessage(e) || (opts.includeService && e.type === 'service')).sort(byTime);
+    let scoped = all;
+    if (!Number.isNaN(beforeMs)) scoped = scoped.filter(e => at(e) < beforeMs);
+    if (!Number.isNaN(afterMs)) scoped = scoped.filter(e => at(e) > afterMs);
+    const forward = Number.isNaN(beforeMs) && !Number.isNaN(afterMs);
+    const limit = clamp(opts.limit, 1, 500);
+    const window = forward ? scoped.slice(0, limit) : scoped.slice(-limit);
+    const records = await mapLimit(window, e => this.recordFor(acc, e.msgKey));
+    const messages = records.flatMap((r, i) => (r ? [this.toMessage(acc, window[i]!, r, opts.includeDocumentText)] : []));
+    const first = window[0];
+    const last = window[window.length - 1];
+    const nextBefore = first && all.some(e => at(e) < at(first)) ? first.date ?? null : null;
+    const nextAfter = last && all.some(e => at(e) > at(last)) ? last.date ?? null : null;
+    return { messages, count: messages.length, more: forward ? nextAfter !== null : nextBefore !== null, nextBefore, nextAfter };
   }
 
   async search(
@@ -875,10 +894,10 @@ export class Vault {
     const info = mediaInfo(record);
     const mediaKey = record.mediaKey ?? entry.mediaKey;
     if (!mediaKey || record.mediaSaved === false || record.mediaError) {
-      return { info, message, reason: 'not_saved', ...(record.documentText ? { text: record.documentText } : {}) };
+      return { info: { ...info, sha256: null }, message, reason: 'not_saved', ...(record.documentText ? { text: record.documentText } : {}) };
     }
     if ((record.mediaBytes ?? 0) > MAX_MEDIA_BYTES) {
-      return { info, message, reason: 'too_large', ...(record.documentText ? { text: record.documentText } : {}) };
+      return { info: { ...info, sha256: null }, message, reason: 'too_large', ...(record.documentText ? { text: record.documentText } : {}) };
     }
     const url = acc.objects[mediaKey];
     if (!url) throw new NotFoundError(`The file of message ${msgId} is not in this bundle; restart the bridge to fetch a fresh one.`);
@@ -893,7 +912,12 @@ export class Vault {
       const doc = await extractDocumentText(bytes, record.fileName ?? null, mimeType);
       if (doc) text = doc;
     }
-    return { info, message, data: { base64: Buffer.from(bytes).toString('base64'), mimeType, bytes: bytes.length }, ...(text ? { text } : {}) };
+    return {
+      info: { ...info, sha256: createHash('sha256').update(bytes).digest('hex') },
+      message,
+      data: { base64: Buffer.from(bytes).toString('base64'), mimeType, bytes: bytes.length },
+      ...(text ? { text } : {}),
+    };
   }
 
   // ---- resolution ----
